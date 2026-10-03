@@ -101,6 +101,7 @@ document.getElementById('intake-form').addEventListener('submit', async (e) => {
     }
     document.getElementById('intake-form').classList.add('hidden');
     document.getElementById('ticket-big').textContent = data.ticket;
+    document.getElementById('customer-code-big').textContent = data.customer_code || '—';
     document.getElementById('ticket-success').classList.remove('hidden');
   } catch {
     err.textContent = 'No se pudo conectar con el servidor.';
@@ -251,16 +252,18 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
 
 // ---------- Lookup ----------
 async function doLookup() {
-  const ticket = document.getElementById('lookup-ticket').value.trim().toUpperCase();
+  const code = document.getElementById('lookup-ticket').value.trim().toUpperCase();
   const err = document.getElementById('lookup-error');
   const box = document.getElementById('lookup-result');
   err.classList.add('hidden');
   box.classList.add('hidden');
-  if (!ticket) return;
+  if (!code) return;
   try {
-    const r = await fetch('/api/orders/' + encodeURIComponent(ticket));
+    const r = await fetch('/api/track/' + encodeURIComponent(code));
     if (!r.ok) {
-      err.textContent = 'Ticket no encontrado. Revisa el número.';
+      err.textContent = r.status === 429
+        ? 'Demasiadas consultas. Espera un minuto.'
+        : 'Código no encontrado. Revisa el código.';
       err.classList.remove('hidden');
       return;
     }

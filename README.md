@@ -14,9 +14,10 @@ Built for **Geeks Hollywood** (4514 Hollywood Blvd, Hollywood, FL · (754) 888-9
   - If **Diagnóstico** is selected, "¿Qué dice el cliente?" becomes required
   - "¿Cómo llegó?" multi-select: Mojado, Backglass partido, No prende, Rayones, Golpes visibles, Con funda, Sin cargador, Otro
   - Received by (required), what was agreed with the customer (required)
-- **Ticket numbers** auto-generated (`GH-0001`, `GH-0002`, …), shown big after saving so staff can give it to the customer
+- **Ticket numbers** auto-generated (`GH-0001`, `GH-0002`, …) for internal shop use, plus a separate **unguessable customer code** (e.g. `X7K2P9QW`) shown big after saving so staff can give it to the customer
 - **Orders list** — search by name / ticket / model / phone, filter by status, one-tap status advance (Recibido → En reparación → Listo → Entregado), full edit of existing orders
-- **Ticket lookup screen** — enter a ticket number to show the current status to the customer in-store
+- **Customer status lookup** — the customer enters their code (not the ticket) and sees only minimal info: ticket, name, device, problems and status. Never phone, IMEI, notes or agreements. Rate-limited (30/min per IP)
+- **Security headers** on every response (`nosniff`, `DENY` framing, `no-referrer`, basic CSP) and no `X-Powered-By` fingerprint
 - **Geeks Hollywood branding** — official logo, brand blue `#3399ff`, red accent `#ef3f56`, dark navy header. Two clearly-marked placeholder slots are reserved for **Blu**, the shop mascot (header + above the intake form) — waiting on the real mascot image.
 
 ## Tech
@@ -59,7 +60,7 @@ Then open **http://localhost:3000** in your browser.
 |--------|---------------------------|------------------------------------------|
 | GET    | `/api/orders`             | List orders (`?search=`, `?status=`)     |
 | POST   | `/api/orders`             | Create order (validates required fields) |
-| GET    | `/api/orders/:ticket`     | Lookup one order by ticket (e.g. GH-0001)|
+| GET    | `/api/track/:code`        | Public customer status lookup by unguessable code (minimal fields, rate-limited) |
 | POST   | `/api/orders/:id/advance`| Advance status one step                  |
 | PUT    | `/api/orders/:id`         | Full edit of an order                    |
 

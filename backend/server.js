@@ -4,10 +4,21 @@
 // dependencies to compile.
 const express = require('express');
 const path = require('path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const app = express();
+app.disable('x-powered-by'); // no anunciar qué tecnología corre el servidor
 const PORT = process.env.PORT || 3000;
+
+// Cabeceras de seguridad en cada respuesta
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self'");
+  next();
+});
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
@@ -38,6 +49,27 @@ db.exec(`
   );
   INSERT OR IGNORE INTO counters (name, value) VALUES ('ticket', 0);
 `);
+
+// Código de consulta del cliente: aleatorio e imposible de adivinar.
+// El ticket (GH-0001...) sigue siendo secuencial para uso interno del taller,
+// pero el cliente consulta su estado con este código, no con el ticket.
+const cols = db.prepare('PRAGMA table_info(orders)').all().map(c => c.name);
+if (!cols.includes('customer_code')) {
+  db.exec('ALTER TABLE orders ADD COLUMN customer_code TEXT');
+  const missing = db.prepare('SELECT id FROM orders WHERE customer_code IS NULL').all();
+  for (const { id } of missing) {
+    db.prepare('UPDATE orders SET customer_code = ? WHERE id = ?').run(generateCustomerCode(), id);
+  }
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_customer_code ON orders(customer_code)');
+
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sin 0/O/1/I/L para evitar confusiones
+function generateCustomerCode() {
+  const bytes = crypto.randomBytes(8);
+  let code = '';
+  for (const b of bytes) code += CODE_ALPHABET[b % CODE_ALPHABET.length];
+  return code; // 8 caracteres, ~1 billón de combinaciones
+}
 
 const STATUSES = ['Recibido', 'En reparación', 'Listo', 'Entregado'];
 
@@ -100,12 +132,14 @@ app.post('/api/orders', (req, res) => {
   if (errors.length) return res.status(400).json({ errors });
   const b = req.body;
   const ticket = nextTicket();
+  const customerCode = generateCustomerCode();
   const info = db.prepare(`
     INSERT INTO orders
-      (ticket, customer_name, phone, device_type, model, imei, problems, arrival_condition, received_by, agreement, diagnostic_note, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibido')
+      (ticket, customer_code, customer_name, phone, device_type, model, imei, problems, arrival_condition, received_by, agreement, diagnostic_note, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibido')
   `).run(
     ticket,
+    customerCode,
     b.customer_name.trim(),
     (b.phone || '').trim(),
     b.device_type.trim(),
@@ -121,12 +155,48 @@ app.post('/api/orders', (req, res) => {
   res.status(201).json(toPublic(row));
 });
 
-// Lookup by ticket (customer-facing)
-app.get('/api/orders/:ticket', (req, res) => {
-  const ticket = req.params.ticket.trim().toUpperCase();
-  const row = db.prepare('SELECT * FROM orders WHERE ticket = ?').get(ticket);
-  if (!row) return res.status(404).json({ error: 'Ticket no encontrado.' });
-  res.json(toPublic(row));
+// Consulta pública de estado (para el cliente).
+// Usa el código imposible de adivinar (no el ticket secuencial) y devuelve
+// solo los campos mínimos: jamás teléfono, IMEI, notas internas ni acuerdos.
+// El endpoint anterior /api/orders/:ticket se eliminó: era secuencial
+// (GH-0001, GH-0002...) y exponía la fila completa.
+const trackHits = new Map(); // ip -> marcas de tiempo (límite simple en memoria)
+function trackRateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const max = 30; // 30 consultas por minuto por IP
+  const hits = (trackHits.get(ip) || []).filter(t => now - t < windowMs);
+  hits.push(now);
+  trackHits.set(ip, hits);
+  if (hits.length > max) {
+    return res.status(429).json({ error: 'Demasiadas consultas. Espera un minuto.' });
+  }
+  next();
+}
+
+function toCustomerView(row) {
+  if (!row) return null;
+  return {
+    ticket: row.ticket,
+    customer_name: row.customer_name,
+    device_type: row.device_type,
+    model: row.model,
+    problems: JSON.parse(row.problems || '[]'),
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+app.get('/api/track/:code', trackRateLimit, (req, res) => {
+  const code = req.params.code.trim().toUpperCase();
+  if (!/^[A-Z2-9]{8}$/.test(code)) {
+    return res.status(404).json({ error: 'Código no encontrado.' });
+  }
+  const row = db.prepare('SELECT * FROM orders WHERE customer_code = ?').get(code);
+  if (!row) return res.status(404).json({ error: 'Código no encontrado.' });
+  res.json(toCustomerView(row));
 });
 
 // Advance status one step

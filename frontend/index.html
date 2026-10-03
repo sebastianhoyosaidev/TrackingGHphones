@@ -90,8 +90,10 @@
 
     <div id="ticket-success" class="hidden">
       <p class="success-label">¡Orden guardada!</p>
-      <p class="success-sub">Dale este número al cliente:</p>
+      <p class="success-sub">Ticket interno del taller:</p>
       <div class="ticket-big" id="ticket-big">GH-0001</div>
+      <p class="success-sub">Código para el cliente <small>(con esto consulta su estado)</small>:</p>
+      <div class="ticket-big" id="customer-code-big">XXXXXXXX</div>
       <button class="btn-primary" id="btn-new-order">Nueva orden</button>
     </div>
   </section>
@@ -113,10 +115,10 @@
 
   <!-- ============ LOOKUP ============ -->
   <section id="view-lookup" class="view">
-    <h2>Consultar estado del ticket</h2>
-    <p class="muted">Escribe el número de ticket para mostrarle el estado al cliente.</p>
+    <h2>Consultar estado</h2>
+    <p class="muted">Escribe el <strong>código de consulta</strong> del cliente (no el ticket).</p>
     <div class="lookup-row">
-      <input type="text" id="lookup-ticket" placeholder="Ej: GH-0001" autocomplete="off">
+      <input type="text" id="lookup-ticket" placeholder="Ej: X7K2P9QW" autocomplete="off">
       <button class="btn-primary" id="btn-lookup">Consultar</button>
     </div>
     <p id="lookup-error" class="error hidden"></p>
