@@ -39,7 +39,7 @@ TrackingGHphones/
 
 ## Run it
 
-Requirements: **Node.js 18+** and npm.
+Requirements: **Node.js 22+** (uses the built-in `node:sqlite` module) and npm.
 
 ```bash
 cd backend
