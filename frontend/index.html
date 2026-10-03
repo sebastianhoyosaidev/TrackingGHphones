@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Órdenes de Reparación — Geeks Hollywood</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="brand-band">
+  <img class="brand-logo" src="assets/logo.png" alt="Geeks Hollywood">
+  <div class="brand-titles">
+    <h1>Órdenes de Reparación</h1>
+    <p>Recepción rápida · Seguimiento · Entrega</p>
+  </div>
+  <!-- Espacio reservado: Blu, la mascota de Geeks Hollywood (próximamente) -->
+  <div class="blu-slot blu-slot-header" title="Espacio reservado para Blu">
+    <span>Blu<br><small>próximamente</small></span>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-view="intake">Nueva orden</button>
+  <button class="tab" data-view="orders">Órdenes</button>
+  <button class="tab" data-view="lookup">Consultar ticket</button>
+</nav>
+
+<main>
+  <!-- ============ INTAKE ============ -->
+  <section id="view-intake" class="view active">
+    <!-- Espacio reservado: Blu, la mascota de Geeks Hollywood (próximamente) -->
+    <div class="blu-slot blu-slot-intake" title="Espacio reservado para Blu">
+      <span>Aquí va <strong>Blu</strong>, la mascota de Geeks Hollywood — próximamente</span>
+    </div>
+
+    <form id="intake-form" autocomplete="off">
+      <label>Nombre del cliente *
+        <input type="text" id="f-name" required placeholder="Ej: Juan Pérez">
+      </label>
+
+      <label>Teléfono (opcional)
+        <input type="tel" id="f-phone" placeholder="Ej: 754-555-0132">
+      </label>
+
+      <div class="field">
+        <span class="field-label">Tipo de equipo *</span>
+        <div class="chips" id="f-device-type">
+          <button type="button" class="chip" data-value="iPhone">iPhone</button>
+          <button type="button" class="chip" data-value="Samsung">Samsung</button>
+          <button type="button" class="chip" data-value="Otro">Otro</button>
+        </div>
+      </div>
+
+      <label>Modelo *
+        <input type="text" id="f-model" required placeholder="Ej: iPhone 14 Pro">
+      </label>
+
+      <label>IMEI (opcional)
+        <input type="text" id="f-imei" placeholder="Opcional">
+      </label>
+
+      <div class="field">
+        <span class="field-label">¿Qué problema tiene? * <small>(puedes marcar varios)</small></span>
+        <div class="chips multi" id="f-problems"></div>
+      </div>
+
+      <div class="field hidden" id="diag-wrap">
+        <label>¿Qué dice el cliente? * <small>(requerido si es diagnóstico)</small>
+          <textarea id="f-diagnostic" rows="2" placeholder="Lo que explica el cliente..."></textarea>
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="field-label">¿Cómo llegó? <small>(puedes marcar varios)</small></span>
+        <div class="chips multi" id="f-arrival"></div>
+      </div>
+
+      <label>¿Quién lo recibe? *
+        <input type="text" id="f-received-by" required placeholder="Nombre del técnico">
+      </label>
+
+      <label>¿Qué se acordó con el cliente? *
+        <textarea id="f-agreement" rows="2" required placeholder="Ej: Se entrega en 2 días, costo $80"></textarea>
+      </label>
+
+      <p id="form-error" class="error hidden"></p>
+      <button type="submit" class="btn-primary">Guardar orden</button>
+    </form>
+
+    <div id="ticket-success" class="hidden">
+      <p class="success-label">¡Orden guardada!</p>
+      <p class="success-sub">Dale este número al cliente:</p>
+      <div class="ticket-big" id="ticket-big">GH-0001</div>
+      <button class="btn-primary" id="btn-new-order">Nueva orden</button>
+    </div>
+  </section>
+
+  <!-- ============ ORDERS ============ -->
+  <section id="view-orders" class="view">
+    <div class="orders-toolbar">
+      <input type="search" id="orders-search" placeholder="Buscar por nombre, ticket, modelo o teléfono...">
+      <div class="chips" id="status-filter">
+        <button type="button" class="chip active" data-value="">Todos</button>
+        <button type="button" class="chip" data-value="Recibido">Recibido</button>
+        <button type="button" class="chip" data-value="En reparación">En reparación</button>
+        <button type="button" class="chip" data-value="Listo">Listo</button>
+        <button type="button" class="chip" data-value="Entregado">Entregado</button>
+      </div>
+    </div>
+    <div id="orders-list"></div>
+  </section>
+
+  <!-- ============ LOOKUP ============ -->
+  <section id="view-lookup" class="view">
+    <h2>Consultar estado del ticket</h2>
+    <p class="muted">Escribe el número de ticket para mostrarle el estado al cliente.</p>
+    <div class="lookup-row">
+      <input type="text" id="lookup-ticket" placeholder="Ej: GH-0001" autocomplete="off">
+      <button class="btn-primary" id="btn-lookup">Consultar</button>
+    </div>
+    <p id="lookup-error" class="error hidden"></p>
+    <div id="lookup-result" class="hidden"></div>
+  </section>
+</main>
+
+<!-- ============ EDIT MODAL ============ -->
+<div id="edit-modal" class="modal hidden">
+  <div class="modal-card">
+    <h2>Editar orden <span id="edit-ticket"></span></h2>
+    <form id="edit-form" autocomplete="off">
+      <label>Nombre del cliente *
+        <input type="text" id="e-name" required>
+      </label>
+      <label>Teléfono
+        <input type="tel" id="e-phone">
+      </label>
+      <div class="field">
+        <span class="field-label">Tipo de equipo *</span>
+        <div class="chips" id="e-device-type">
+          <button type="button" class="chip" data-value="iPhone">iPhone</button>
+          <button type="button" class="chip" data-value="Samsung">Samsung</button>
+          <button type="button" class="chip" data-value="Otro">Otro</button>
+        </div>
+      </div>
+      <label>Modelo *
+        <input type="text" id="e-model" required>
+      </label>
+      <label>IMEI
+        <input type="text" id="e-imei">
+      </label>
+      <div class="field">
+        <span class="field-label">Problemas *</span>
+        <div class="chips multi" id="e-problems"></div>
+      </div>
+      <div class="field hidden" id="e-diag-wrap">
+        <label>¿Qué dice el cliente? *
+          <textarea id="e-diagnostic" rows="2"></textarea>
+        </label>
+      </div>
+      <div class="field">
+        <span class="field-label">¿Cómo llegó?</span>
+        <div class="chips multi" id="e-arrival"></div>
+      </div>
+      <label>¿Quién lo recibe? *
+        <input type="text" id="e-received-by" required>
+      </label>
+      <label>¿Qué se acordó? *
+        <textarea id="e-agreement" rows="2" required></textarea>
+      </label>
+      <label>Estado
+        <select id="e-status">
+          <option>Recibido</option>
+          <option>En reparación</option>
+          <option>Listo</option>
+          <option>Entregado</option>
+        </select>
+      </label>
+      <p id="edit-error" class="error hidden"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="btn-edit-cancel">Cancelar</button>
+        <button type="submit" class="btn-primary">Guardar cambios</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

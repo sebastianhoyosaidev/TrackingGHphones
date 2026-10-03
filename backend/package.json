@@ -1,0 +1,1 @@
+{"dependencies":{"express":"^4.21.2"},"description":"Repair order management web app for Geeks Hollywood — fast intake, status tracking, and ticket lookup. (SQLite via Node's built-in node:sqlite, no native deps.)","license":"UNLICENSED","main":"server.js","name":"trackingghphones","private":true,"scripts":{"start":"node server.js"},"version":"1.0.0"}

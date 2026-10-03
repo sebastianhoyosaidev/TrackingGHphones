@@ -1,0 +1,180 @@
+/* Geeks Hollywood — Órdenes de Reparación */
+:root {
+  --brand-blue: #3399ff;
+  --brand-blue-dark: #1f7fd6;
+  --brand-red: #ef3f56;
+  --navy: #0d1b2e;
+  --navy-2: #12263f;
+  --bg: #f2f5f9;
+  --card: #ffffff;
+  --text: #1c2733;
+  --muted: #6b7a8d;
+  --border: #dbe3ec;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ---------- Header ---------- */
+.brand-band {
+  background: linear-gradient(135deg, var(--navy) 0%, var(--navy-2) 100%);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  flex-wrap: wrap;
+}
+.brand-logo { height: 52px; width: auto; }
+.brand-titles h1 { margin: 0; font-size: 1.35rem; }
+.brand-titles p { margin: 2px 0 0; font-size: 0.85rem; color: #a9c6e8; }
+.blu-slot-header {
+  margin-left: auto;
+  width: 76px; height: 76px;
+  border: 2px dashed rgba(255,255,255,.45);
+  border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center; font-size: .75rem; color: #cfe3ff; line-height: 1.25;
+}
+
+/* ---------- Tabs ---------- */
+.tabs {
+  display: flex;
+  background: var(--navy);
+  padding: 0 12px;
+  gap: 4px;
+  position: sticky; top: 0; z-index: 10;
+}
+.tab {
+  flex: 1;
+  background: none; border: none; color: #b9d2ee;
+  padding: 14px 8px; font-size: 1rem; cursor: pointer;
+  border-bottom: 3px solid transparent;
+}
+.tab.active { color: #fff; border-bottom-color: var(--brand-blue); font-weight: 600; }
+
+/* ---------- Layout ---------- */
+main { max-width: 720px; margin: 0 auto; padding: 18px 14px 60px; }
+.view { display: none; }
+.view.active { display: block; }
+.hidden { display: none !important; }
+.muted { color: var(--muted); }
+.error { color: var(--brand-red); font-weight: 600; }
+
+/* ---------- Blu placeholder (intake) ---------- */
+.blu-slot-intake {
+  border: 2px dashed var(--brand-blue);
+  background: #e8f3ff;
+  color: #2a5f9e;
+  border-radius: var(--radius);
+  padding: 18px;
+  text-align: center;
+  margin-bottom: 18px;
+  font-size: .95rem;
+}
+
+/* ---------- Form ---------- */
+form label, .field { display: block; margin-bottom: 16px; font-weight: 600; font-size: .95rem; }
+.field-label { display: block; margin-bottom: 8px; font-weight: 600; font-size: .95rem; }
+.field-label small, label small { font-weight: 400; color: var(--muted); }
+input[type="text"], input[type="tel"], input[type="search"], textarea, select {
+  width: 100%; margin-top: 6px; padding: 12px;
+  border: 1.5px solid var(--border); border-radius: var(--radius);
+  font-size: 1rem; font-family: inherit; background: #fff; color: var(--text);
+}
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--brand-blue); box-shadow: 0 0 0 3px rgba(51,153,255,.15); }
+textarea { resize: vertical; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  border: 1.5px solid var(--border); background: #fff; color: var(--text);
+  border-radius: 999px; padding: 10px 16px; font-size: .95rem; cursor: pointer;
+  transition: all .12s ease;
+}
+.chip.active {
+  background: var(--brand-blue); border-color: var(--brand-blue); color: #fff; font-weight: 600;
+}
+
+.btn-primary {
+  width: 100%; background: var(--brand-blue); color: #fff; border: none;
+  border-radius: var(--radius); padding: 15px; font-size: 1.05rem; font-weight: 700;
+  cursor: pointer;
+}
+.btn-primary:hover { background: var(--brand-blue-dark); }
+.btn-secondary {
+  background: #e7edf4; color: var(--text); border: none;
+  border-radius: var(--radius); padding: 15px 20px; font-size: 1rem; font-weight: 600; cursor: pointer;
+}
+
+/* ---------- Ticket success ---------- */
+#ticket-success { text-align: center; padding: 30px 10px; }
+.success-label { font-size: 1.3rem; font-weight: 700; color: #1d9e57; margin: 0; }
+.success-sub { color: var(--muted); margin: 8px 0 4px; }
+.ticket-big {
+  font-size: 3.2rem; font-weight: 800; letter-spacing: 2px;
+  color: var(--navy); background: #fff; border: 3px solid var(--brand-blue);
+  border-radius: 18px; padding: 22px; margin: 12px 0 22px;
+}
+
+/* ---------- Orders list ---------- */
+.orders-toolbar { margin-bottom: 14px; }
+.orders-toolbar input { margin-bottom: 10px; }
+.order-card {
+  background: var(--card); border-radius: var(--radius);
+  border: 1px solid var(--border); padding: 14px; margin-bottom: 12px;
+}
+.order-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.order-ticket { font-weight: 800; font-size: 1.1rem; color: var(--navy); }
+.status-badge {
+  font-size: .8rem; font-weight: 700; padding: 5px 12px; border-radius: 999px; white-space: nowrap;
+}
+.status-Recibido { background: #e8f3ff; color: #1f7fd6; }
+.status-En\ reparación { background: #fff4d6; color: #9a6b00; }
+.status-Listo { background: #e3f7ec; color: #1d9e57; }
+.status-Entregado { background: #eceff3; color: var(--muted); }
+.order-name { font-weight: 600; margin: 8px 0 2px; }
+.order-meta { color: var(--muted); font-size: .9rem; margin: 2px 0; }
+.order-problems { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.tag { background: #eef4fb; border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: .8rem; }
+.order-actions { display: flex; gap: 8px; margin-top: 10px; }
+.btn-advance {
+  flex: 1; background: var(--brand-blue); color: #fff; border: none;
+  border-radius: 10px; padding: 11px; font-weight: 700; cursor: pointer; font-size: .95rem;
+}
+.btn-advance:hover { background: var(--brand-blue-dark); }
+.btn-edit {
+  background: #e7edf4; color: var(--text); border: none;
+  border-radius: 10px; padding: 11px 16px; font-weight: 600; cursor: pointer; font-size: .95rem;
+}
+.empty { text-align: center; color: var(--muted); padding: 40px 0; }
+
+/* ---------- Lookup ---------- */
+.lookup-row { display: flex; gap: 8px; }
+.lookup-row input { flex: 1; margin-top: 0; text-transform: uppercase; }
+.lookup-row .btn-primary { width: auto; padding: 12px 22px; }
+.lookup-card {
+  background: #fff; border-radius: var(--radius); border: 1px solid var(--border);
+  padding: 20px; margin-top: 16px;
+}
+.lookup-status {
+  font-size: 2rem; font-weight: 800; text-align: center; margin: 6px 0 14px;
+  padding: 16px; border-radius: var(--radius); background: #f4f8fd;
+}
+
+/* ---------- Modal ---------- */
+.modal {
+  position: fixed; inset: 0; background: rgba(13,27,46,.6);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 20px 12px; overflow-y: auto; z-index: 50;
+}
+.modal-card { background: #fff; border-radius: 16px; padding: 20px; width: 100%; max-width: 640px; }
+.modal-card h2 { margin-top: 0; }
+.modal-actions { display: flex; gap: 10px; }
+.modal-actions .btn-primary { flex: 1; }
