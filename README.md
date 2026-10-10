@@ -17,6 +17,10 @@ Built for **Geeks Hollywood** (4514 Hollywood Blvd, Hollywood, FL · (754) 888-9
 - **Ticket numbers** auto-generated (`GH-0001`, `GH-0002`, …) for internal shop use, plus a separate **unguessable customer code** (e.g. `X7K2P9QW`) shown big after saving so staff can give it to the customer
 - **Orders list** — search by name / ticket / model / phone, filter by status, one-tap status advance (Recibido → En reparación → Listo → Entregado), full edit of existing orders
 - **Customer status lookup** — the customer enters their code (not the ticket) and sees only minimal info: ticket, name, device, problems and status. Never phone, IMEI, notes or agreements. Rate-limited (30/min per IP)
+- **Rate limiting on staff routes** — `/api/orders*` limited to 300 requests/min per IP (429 if exceeded); tunable via `STAFF_RATE_LIMIT_MAX` / `TRACK_RATE_LIMIT_MAX` env vars
+- **Audit trail** — every status change (advance, edit, delete) is recorded with timestamp, order, from/to status and actor; viewable at `GET /api/orders/:id/audit`
+- **Delete test orders** — orders still in `Recibido` can be deleted (API + "Eliminar" button on the card); later statuses are protected
+- **Backups** — `npm run backup` snapshots the database to timestamped files in `backend/backups/` (see Backups section)
 - **Security headers** on every response (`nosniff`, `DENY` framing, `no-referrer`, basic CSP) and no `X-Powered-By` fingerprint
 - **Geeks Hollywood branding** — official logo, brand blue `#3399ff`, red accent `#ef3f56`, dark navy header. Two clearly-marked placeholder slots are reserved for **Blu**, the shop mascot (header + above the intake form) — waiting on the real mascot image.
 
@@ -34,7 +38,10 @@ TrackingGHphones/
 │       └── logo.png        # Geeks Hollywood logo
 ├── backend/
 │   ├── server.js           # Express API + SQLite
+│   ├── backup.js           # DB backup script (npm run backup)
+│   ├── backups/            # timestamped DB copies (git-ignored)
 │   └── package.json
+├── CHANGELOG.md            # version history
 └── README.md
 ```
 
@@ -52,6 +59,28 @@ Then open **http://localhost:3000** in your browser.
 
 - The SQLite database file (`backend/repairshop.db`) is created automatically on first run and starts empty.
 - To run on a different port: `PORT=8080 node server.js`
+- `npm start` runs the server with `NODE_ENV=production`. In production the global error handler returns a generic "Error interno del servidor." message to clients and logs the full error (with stack trace) server-side only — stack traces never reach the client. Run `node server.js` directly for local debugging (development mode); client-facing error behavior is the same in both modes.
+
+## Backups
+
+```bash
+cd backend
+npm run backup
+```
+
+This copies `repairshop.db` to a timestamped file in `backend/backups/` (e.g. `repairshop-20261009-211500.db`) using SQLite's `VACUUM INTO` — a clean, consistent copy that is safe to take while the server is running. The `backups/` folder is git-ignored; copy the files somewhere safe (USB drive, cloud storage) on a regular schedule.
+
+**Restore:** stop the server, then replace the live database with the backup:
+
+```bash
+# 1. Stop the server first!
+cd backend
+cp repairshop.db repairshop.db.before-restore   # safety copy of the current DB
+cp backups/repairshop-20261009-211500.db repairshop.db
+node server.js
+```
+
+WAL sidecar files (`repairshop.db-wal`, `repairshop.db-shm`) are recreated automatically — no need to back them up.
 - For a shop computer on the local network, run the server there and open `http://<server-ip>:3000` from the counter devices.
 
 ## API (for developers)
@@ -63,6 +92,8 @@ Then open **http://localhost:3000** in your browser.
 | GET    | `/api/track/:code`        | Public customer status lookup by unguessable code (minimal fields, rate-limited) |
 | POST   | `/api/orders/:id/advance`| Advance status one step                  |
 | PUT    | `/api/orders/:id`         | Full edit of an order                    |
+| DELETE | `/api/orders/:id`         | Delete an order (only in `Recibido` status; 404/409 otherwise) |
+| GET    | `/api/orders/:id/audit`   | Status-change history of an order (audit trail) |
 
 ## Notes
 

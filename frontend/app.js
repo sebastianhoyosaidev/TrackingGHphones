@@ -69,6 +69,46 @@ buildChips('e-device-type', ['iPhone', 'Samsung', 'Otro']);
 buildChips('e-problems', PROBLEMS, { multi: true, onChange: () => toggleDiag('e-problems', 'e-diag-wrap') });
 buildChips('e-arrival', ARRIVAL, { multi: true });
 
+// ---------- Rellenar datos de prueba ----------
+document.getElementById('btn-fill-test').addEventListener('click', () => {
+  document.getElementById('f-name').value = 'Test User';
+  document.getElementById('f-phone').value = '300-000-0000';
+  setSelected('f-device-type', ['iPhone']);
+  document.getElementById('f-model').value = 'Modelo de Prueba';
+  document.getElementById('f-imei').value = '000000000000000';
+  setSelected('f-problems', ['Pantalla partida']);
+  toggleDiag('f-problems', 'diag-wrap');
+  setSelected('f-arrival', ['Golpes visibles']);
+  document.getElementById('f-received-by').value = 'Técnico de Prueba';
+  document.getElementById('f-agreement').value = 'Datos de prueba — borrar después';
+  document.getElementById('f-diagnostic').value = '';
+});
+
+// ---------- Scroll + foco al primer campo inválido ----------
+function focusFirstInvalid(prefix) {
+  const g = (id) => document.getElementById(prefix + '-' + id);
+  const checks = [
+    [g('name'), () => g('name').value.trim() !== ''],
+    [document.getElementById(prefix + '-device-type'), () => getSelected(prefix + '-device-type').length > 0],
+    [g('model'), () => g('model').value.trim() !== ''],
+    [document.getElementById(prefix + '-problems'), () => getSelected(prefix + '-problems').length > 0],
+    [g('received-by'), () => g('received-by').value.trim() !== ''],
+    [g('agreement'), () => g('agreement').value.trim() !== '']
+  ];
+  if (getSelected(prefix + '-problems').includes('Diagnóstico')) {
+    const d = g('diagnostic');
+    if (d) checks.push([d, () => d.value.trim() !== '']);
+  }
+  for (const [el, ok] of checks) {
+    if (!el || ok()) continue;
+    el.classList.add('flash-invalid');
+    setTimeout(() => el.classList.remove('flash-invalid'), 2500);
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (typeof el.focus === 'function' && el.tagName !== 'DIV') el.focus({ preventScroll: true });
+    return;
+  }
+}
+
 // ---------- Intake submit ----------
 document.getElementById('intake-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -97,6 +137,7 @@ document.getElementById('intake-form').addEventListener('submit', async (e) => {
     if (!r.ok) {
       err.textContent = (data.errors || ['Error al guardar.']).join(' ');
       err.classList.remove('hidden');
+      focusFirstInvalid('f');
       return;
     }
     document.getElementById('intake-form').classList.add('hidden');
@@ -159,6 +200,7 @@ async function loadOrders() {
         <div class="order-actions">
           ${canAdvance ? `<button class="btn-advance" data-id="${o.id}">${esc(NEXT_LABEL[o.status])}</button>` : ''}
           <button class="btn-edit" data-id="${o.id}">Editar</button>
+          ${o.status === 'Recibido' ? `<button class="btn-delete" data-id="${o.id}">Eliminar</button>` : ''}
         </div>`;
       list.appendChild(card);
     });
@@ -166,6 +208,8 @@ async function loadOrders() {
       b.addEventListener('click', () => advanceOrder(b.dataset.id)));
     list.querySelectorAll('.btn-edit').forEach(b =>
       b.addEventListener('click', () => openEdit(b.dataset.id)));
+    list.querySelectorAll('.btn-delete').forEach(b =>
+      b.addEventListener('click', () => deleteOrder(b.dataset.id)));
   } catch {
     list.innerHTML = '<p class="empty">No se pudo cargar. Revisa la conexión.</p>';
   }
@@ -174,6 +218,21 @@ async function loadOrders() {
 async function advanceOrder(id) {
   await fetch('/api/orders/' + id + '/advance', { method: 'POST' });
   loadOrders();
+}
+
+async function deleteOrder(id) {
+  if (!confirm('¿Eliminar esta orden? Solo se puede eliminar en estado Recibido.')) return;
+  try {
+    const r = await fetch('/api/orders/' + id, { method: 'DELETE' });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(data.error || 'No se pudo eliminar.');
+      return;
+    }
+    loadOrders();
+  } catch {
+    alert('No se pudo conectar con el servidor.');
+  }
 }
 
 function esc(s) {
@@ -240,6 +299,7 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
     if (!r.ok) {
       err.textContent = (data.errors || ['Error al guardar.']).join(' ');
       err.classList.remove('hidden');
+      focusFirstInvalid('e');
       return;
     }
     document.getElementById('edit-modal').classList.add('hidden');

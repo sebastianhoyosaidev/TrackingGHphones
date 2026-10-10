@@ -153,6 +153,11 @@ textarea { resize: vertical; }
   background: #e7edf4; color: var(--text); border: none;
   border-radius: 10px; padding: 11px 16px; font-weight: 600; cursor: pointer; font-size: .95rem;
 }
+.btn-delete {
+  background: #fff; color: var(--brand-red); border: 1.5px solid var(--brand-red);
+  border-radius: 10px; padding: 10px 16px; font-weight: 600; cursor: pointer; font-size: .95rem;
+}
+.btn-delete:hover { background: var(--brand-red); color: #fff; }
 .empty { text-align: center; color: var(--muted); padding: 40px 0; }
 
 /* ---------- Lookup ---------- */
@@ -178,3 +183,7 @@ textarea { resize: vertical; }
 .modal-card h2 { margin-top: 0; }
 .modal-actions { display: flex; gap: 10px; }
 .modal-actions .btn-primary { flex: 1; }
+
+/* ---------- Test-data button ---------- */
+#btn-fill-test { width: 100%; margin-bottom: 10px; }
+.flash-invalid { outline: 3px solid var(--brand-red); outline-offset: 3px; border-radius: var(--radius); }

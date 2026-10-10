@@ -3,6 +3,80 @@
 Notas de cada versión publicada. El código vive en este repo privado;
 la app de verdad corre en el servidor (Oracle Cloud).
 
+## v1.2.0 — 2026-10-09 — Robustez del servidor y herramientas de taller
+
+**Formulario de recepción**
+- Nuevo botón "Rellenar datos de prueba": llena el formulario con datos
+  falsos (Test User, 300-000-0000, …) para probar rápido sin escribir.
+- Si el servidor rechaza la orden, el formulario ahora baja (scroll) y enfoca
+  el primer campo faltante o inválido, con un resaltado rojo temporal.
+  También aplica al formulario de edición.
+
+**Manejo de errores**
+- Nuevo middleware global de errores: el cliente siempre recibe un mensaje
+  genérico ("Error interno del servidor."); el error completo con stack trace
+  se registra solo en el log del servidor. Nunca se filtran detalles internos.
+- El cuerpo JSON malformado responde 400 con mensaje claro.
+- `npm start` ahora corre con `NODE_ENV=production` (documentado en README).
+
+**Códigos de cliente**
+- Al crear una orden, si el `customer_code` aleatorio colisionara (casi
+  imposible: ~1 billón de combinaciones), se reintenta con un código nuevo
+  hasta 5 veces antes de devolver 500. El ticket no se regenera en los
+  reintentos (no se queman números extra).
+
+**Límites de peticiones (rate limiting)**
+- Nuevo límite general para las rutas del taller (`/api/orders*`):
+  300 peticiones por minuto por IP (responde 429 si se excede).
+- La consulta pública (`/api/track/:code`) mantiene su límite de 30/min por IP.
+- Los máximos se pueden ajustar con `STAFF_RATE_LIMIT_MAX` y
+  `TRACK_RATE_LIMIT_MAX` (útil para pruebas).
+
+**Validación en el servidor**
+- Topes de longitud en todos los campos de texto: nombre 100, teléfono 30,
+  tipo de equipo 30, modelo 100, IMEI 40, quién recibe 100, qué se acordó 2000,
+  nota de diagnóstico 2000 caracteres.
+- `problems` y `arrival_condition` deben ser listas de textos: máximo 12
+  elementos, 40 caracteres cada uno. Cualquier violación responde 400 con
+  mensaje claro en español.
+
+**Base de datos**
+- SQLite ahora abre en modo WAL (`journal_mode = WAL`) con `busy_timeout`
+  de 5000 ms: las lecturas no bloquean a las escrituras y el servidor espera
+  el candado en vez de fallar de inmediato.
+
+**Eliminar órdenes de prueba**
+- Nuevo `DELETE /api/orders/:id`: elimina órdenes todavía en estado
+  `Recibido` (la forma segura de borrar órdenes de prueba falsas).
+  Responde 404 si no existe y 409 si ya avanzó de estado.
+- En la lista de órdenes aparece un botón "Eliminar" solo en tarjetas con
+  estado Recibido (pide confirmación).
+
+**Auditoría de estados**
+- Nueva tabla `audit_log`: cada cambio de estado (avance, edición o
+  eliminación) guarda fecha/hora, id y ticket de la orden, estado anterior y
+  nuevo, y actor ("staff" hasta que exista login).
+- Nuevo `GET /api/orders/:id/audit`: historial de cambios de una orden
+  (404 si la orden no existe).
+
+**Cabeceras de seguridad**
+- La CSP ahora incluye `object-src 'none'`, `base-uri 'self'` y
+  `frame-ancestors 'self'`, sin romper el frontend existente.
+
+**Respaldos**
+- Nuevo `npm run backup` (`backend/backup.js`): copia `repairshop.db` con
+  `VACUUM INTO` a `backend/backups/repairshop-AAAAMMDD-HHMMSS.db`
+  (carpeta ignorada por git). Instrucciones de restauración en README.
+
+**Evaluación Express 5**
+- Se evaluó migrar de Express 4 a 5: esfuerzo bajo (~1–2 h con pruebas) y
+  riesgo bajo para este código (sin rutas comodín ni sintaxis afectada), pero
+  beneficio marginal ahora. Recomendación: migrar después, junto con el
+  track de login del personal. No se migró en esta versión.
+
+**Versiones**
+- `backend/package.json` 1.0.0 → 1.1.0 (iguala lo documentado en este historial).
+
 ## v1.1.0 — 2026-10-03 — Seguridad del lado del cliente
 
 **Código de consulta imposible de adivinar**
