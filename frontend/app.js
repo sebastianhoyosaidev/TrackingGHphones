@@ -1,4 +1,69 @@
 // Órdenes de Reparación — Geeks Hollywood (frontend)
+
+// Todas las peticiones llevan las cookies de sesión.
+const api = (url, opts = {}) => fetch(url, { credentials: 'same-origin', ...opts });
+
+// ---------- Sesión ----------
+let currentUser = null;
+function showLogin() {
+  currentUser = null;
+  document.getElementById('main-tabs').classList.add('hidden');
+  document.querySelectorAll('main .view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-login').classList.add('active');
+}
+function showApp(username) {
+  currentUser = username;
+  document.getElementById('view-login').classList.remove('active');
+  document.getElementById('main-tabs').classList.remove('hidden');
+  document.getElementById('user-name').textContent = username;
+  document.querySelectorAll('main .view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-intake').classList.add('active');
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === 'intake'));
+  // Quién lo recibe sale de la sesión (el servidor lo impone de todos modos).
+  const rb = document.getElementById('f-received-by');
+  rb.value = username;
+  rb.readOnly = true;
+}
+async function checkSession() {
+  try {
+    const r = await api('/api/me');
+    if (!r.ok) return showLogin();
+    showApp((await r.json()).username);
+  } catch {
+    showLogin();
+  }
+}
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('login-error');
+  err.classList.add('hidden');
+  try {
+    const r = await api('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('login-user').value,
+        password: document.getElementById('login-pass').value
+      })
+    });
+    if (!r.ok) {
+      err.textContent = 'Credenciales inválidas.';
+      err.classList.remove('hidden');
+      return;
+    }
+    document.getElementById('login-pass').value = '';
+    showApp((await r.json()).username);
+  } catch {
+    err.textContent = 'No se pudo conectar con el servidor.';
+    err.classList.remove('hidden');
+  }
+});
+document.getElementById('btn-logout').addEventListener('click', async () => {
+  try { await api('/api/logout', { method: 'POST' }); } catch { /* igual mostramos el login */ }
+  showLogin();
+});
+checkSession();
+
 const PROBLEMS = [
   'Diagnóstico', 'Pantalla partida', 'Backglass roto', 'Charging port',
   'Cámara frontal', 'Cámara trasera', 'No carga', 'Batería',
@@ -128,7 +193,7 @@ document.getElementById('intake-form').addEventListener('submit', async (e) => {
     diagnostic_note: document.getElementById('f-diagnostic').value
   };
   try {
-    const r = await fetch('/api/orders', {
+    const r = await api('/api/orders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -177,7 +242,7 @@ async function loadOrders() {
     status: currentStatusFilter
   });
   try {
-    const orders = await (await fetch('/api/orders?' + q)).json();
+    const orders = await (await api('/api/orders?' + q)).json();
     if (!orders.length) {
       list.innerHTML = '<p class="empty">No hay órdenes aquí todavía.</p>';
       return;
@@ -216,14 +281,14 @@ async function loadOrders() {
 }
 
 async function advanceOrder(id) {
-  await fetch('/api/orders/' + id + '/advance', { method: 'POST' });
+  await api('/api/orders/' + id + '/advance', { method: 'POST' });
   loadOrders();
 }
 
 async function deleteOrder(id) {
   if (!confirm('¿Eliminar esta orden? Solo se puede eliminar en estado Recibido.')) return;
   try {
-    const r = await fetch('/api/orders/' + id, { method: 'DELETE' });
+    const r = await api('/api/orders/' + id, { method: 'DELETE' });
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
       alert(data.error || 'No se pudo eliminar.');
@@ -244,7 +309,7 @@ function esc(s) {
 // ---------- Edit ----------
 let editingId = null;
 async function openEdit(id) {
-  const orders = await (await fetch('/api/orders')).json();
+  const orders = await (await api('/api/orders')).json();
   const o = orders.find(x => String(x.id) === String(id));
   if (!o) return;
   editingId = o.id;
@@ -290,7 +355,7 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
     status: document.getElementById('e-status').value
   };
   try {
-    const r = await fetch('/api/orders/' + editingId, {
+    const r = await api('/api/orders/' + editingId, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -319,7 +384,7 @@ async function doLookup() {
   box.classList.add('hidden');
   if (!code) return;
   try {
-    const r = await fetch('/api/track/' + encodeURIComponent(code));
+    const r = await api('/api/track/' + encodeURIComponent(code));
     if (!r.ok) {
       err.textContent = r.status === 429
         ? 'Demasiadas consultas. Espera un minuto.'

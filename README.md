@@ -61,6 +61,22 @@ Then open **http://localhost:3000** in your browser.
 - To run on a different port: `PORT=8080 node server.js`
 - `npm start` runs the server with `NODE_ENV=production`. In production the global error handler returns a generic "Error interno del servidor." message to clients and logs the full error (with stack trace) server-side only — stack traces never reach the client. Run `node server.js` directly for local debugging (development mode); client-facing error behavior is the same in both modes.
 
+### Local con login (para probar)
+
+El taller requiere iniciar sesión. El admin inicial se crea **solo** desde variables de entorno — nunca hay credenciales en el código:
+
+```bash
+cd backend
+cp .env.example .env   # edítalo y pon tu usuario/clave
+npm run start:local    # lee backend/.env automáticamente
+```
+
+Abre **http://localhost:3000** e inicia sesión con tu usuario de `.env`.
+
+- `.env` está en `.gitignore`: jamás se sube a git.
+- Sin `ADMIN_USER`/`ADMIN_PASSWORD` el servidor arranca igual pero sin usuarios (verás el aviso en consola).
+- Sesiones de 12 h en cookie httpOnly; `POST /api/change-password` cambia la clave (mínimo 8 caracteres).
+
 ## Backups
 
 ```bash

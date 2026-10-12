@@ -9,6 +9,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const app = express();
 app.disable('x-powered-by'); // no anunciar qué tecnología corre el servidor
+app.set('trust proxy', 'loopback'); // para Nginx en producción; inofensivo en local
 const PORT = process.env.PORT || 3000;
 
 // Cabeceras de seguridad en cada respuesta
@@ -56,6 +57,7 @@ const staffRateLimit = makeRateLimiter({
   message: 'Demasiadas solicitudes. Espera un momento.',
 });
 app.use('/api/orders', staffRateLimit);
+app.use('/api/orders', requireAuth); // login obligatorio en todo lo del taller
 
 const db = new DatabaseSync(path.join(__dirname, 'repairshop.db'));
 // WAL: las lecturas no bloquean a las escrituras (y viceversa); busy_timeout
@@ -96,6 +98,20 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
   );
   CREATE INDEX IF NOT EXISTS idx_audit_log_order ON audit_log(order_id);
+  CREATE TABLE IF NOT EXISTS staff_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
+  CREATE TABLE IF NOT EXISTS staff_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES staff_users(id) ON DELETE CASCADE,
+    username TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_staff_sessions_user ON staff_sessions(user_id);
 `);
 
 // Código de consulta del cliente: aleatorio e imposible de adivinar.
@@ -111,6 +127,144 @@ if (!cols.includes('customer_code')) {
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_customer_code ON orders(customer_code)');
 
+// ============ LOGIN DEL PERSONAL ============
+// Sesiones con cookies httpOnly. Contraseñas con scrypt (node:crypto, sin
+// dependencias nuevas). El admin inicial se crea SOLO desde variables de
+// entorno (nunca en el código): ADMIN_USER / ADMIN_PASSWORD.
+// En local: ponlas en backend/.env (gitignored) y corre `npm run start:local`.
+const SESSION_COOKIE = 'gh_session';
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 horas
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function verifyPassword(password, stored) {
+  const parts = String(stored).split(':');
+  if (parts.length !== 2) return false;
+  const check = crypto.scryptSync(password, parts[0], 64);
+  const expected = Buffer.from(parts[1], 'hex');
+  return check.length === expected.length && crypto.timingSafeEqual(check, expected);
+}
+
+function parseCookies(req) {
+  const out = {};
+  const header = req.headers.cookie;
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+function createSession(userId, username) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString().slice(0, 19).replace('T', ' ');
+  db.prepare('INSERT INTO staff_sessions (token_hash, user_id, username, expires_at) VALUES (?, ?, ?, ?)')
+    .run(tokenHash, userId, username, expiresAt);
+  return token;
+}
+
+function getSessionUser(req) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const s = db.prepare(
+    "SELECT user_id, username FROM staff_sessions WHERE token_hash = ? AND expires_at > datetime('now')"
+  ).get(tokenHash);
+  return s ? { id: s.user_id, username: s.username } : null;
+}
+
+function setSessionCookie(req, res, token) {
+  // Secure solo cuando la conexión ya es HTTPS (detrás de Nginx con trust proxy).
+  const secure = req.secure ? '; Secure' : '';
+  res.setHeader('Set-Cookie',
+    `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_MS / 1000}${secure}`);
+}
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
+
+// Guardia: todo /api/orders/* la requiere. /api/track/:code sigue público.
+function requireAuth(req, res, next) {
+  const user = getSessionUser(req);
+  if (!user) return res.status(401).json({ error: 'No autorizado. Inicia sesión.' });
+  req.staffUser = user;
+  next();
+}
+
+// Admin inicial: solo si no hay usuarios Y las variables están definidas.
+(function seedAdmin() {
+  const n = db.prepare('SELECT COUNT(*) AS n FROM staff_users').get().n;
+  if (n > 0) return;
+  const u = (process.env.ADMIN_USER || '').trim();
+  const p = process.env.ADMIN_PASSWORD || '';
+  if (!u || !p) {
+    console.log('Sin usuarios de personal. Define ADMIN_USER y ADMIN_PASSWORD (backend/.env) para crear el admin inicial.');
+    return;
+  }
+  db.prepare('INSERT INTO staff_users (username, password_hash) VALUES (?, ?)').run(u, hashPassword(p));
+  console.log(`Admin inicial creado: "${u}".`);
+})();
+
+// Anti-fuerza-bruta en el login: 10 intentos/min por IP.
+const loginRateLimit = makeRateLimiter({
+  windowMs: 60 * 1000,
+  max: parseInt(process.env.LOGIN_RATE_LIMIT_MAX || '10', 10),
+  message: 'Demasiados intentos. Espera un minuto.',
+});
+
+app.post('/api/login', loginRateLimit, (req, res) => {
+  const { username, password } = req.body || {};
+  if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
+    return res.status(401).json({ error: 'Credenciales inválidas.' });
+  }
+  const user = db.prepare('SELECT * FROM staff_users WHERE username = ?').get(username.trim());
+  // Mensaje genérico a propósito: no revela si el usuario existe.
+  if (!user || !verifyPassword(password, user.password_hash)) {
+    return res.status(401).json({ error: 'Credenciales inválidas.' });
+  }
+  const token = createSession(user.id, user.username);
+  setSessionCookie(req, res, token);
+  res.json({ ok: true, username: user.username });
+});
+
+app.post('/api/logout', (req, res) => {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (token) {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    db.prepare('DELETE FROM staff_sessions WHERE token_hash = ?').run(tokenHash);
+  }
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+app.get('/api/me', (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return res.status(401).json({ error: 'No autorizado.' });
+  res.json({ username: user.username });
+});
+
+app.post('/api/change-password', requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof newPassword !== 'string' || newPassword.length < 8) {
+    return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 8 caracteres.' });
+  }
+  const user = db.prepare('SELECT * FROM staff_users WHERE id = ?').get(req.staffUser.id);
+  if (!user || !verifyPassword(currentPassword || '', user.password_hash)) {
+    return res.status(401).json({ error: 'Credenciales inválidas.' });
+  }
+  db.prepare('UPDATE staff_users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), user.id);
+  // Revoca todas las sesiones y emite una fresca.
+  db.prepare('DELETE FROM staff_sessions WHERE user_id = ?').run(user.id);
+  const token = createSession(user.id, user.username);
+  setSessionCookie(req, res, token);
+  res.json({ ok: true });
+});
+
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sin 0/O/1/I/L para evitar confusiones
 function generateCustomerCode() {
   const bytes = crypto.randomBytes(8);
@@ -121,13 +275,12 @@ function generateCustomerCode() {
 
 const STATUSES = ['Recibido', 'En reparación', 'Listo', 'Entregado'];
 
-// Auditoría de cambios de estado. actor = 'staff' hasta que exista login
-// (el login del personal es un track separado).
-function logStatusChange(orderId, ticket, fromStatus, toStatus) {
+// Auditoría de cambios de estado. actor = usuario autenticado de la sesión.
+function logStatusChange(orderId, ticket, fromStatus, toStatus, actor) {
   db.prepare(`
     INSERT INTO audit_log (order_id, ticket, from_status, to_status, actor)
-    VALUES (?, ?, ?, ?, 'staff')
-  `).run(orderId, ticket, fromStatus, toStatus);
+    VALUES (?, ?, ?, ?, ?)
+  `).run(orderId, ticket, fromStatus, toStatus, actor);
 }
 
 function nextTicket() {
@@ -242,6 +395,8 @@ app.get('/api/orders', (req, res) => {
 
 // Create order
 app.post('/api/orders', (req, res) => {
+  // Quién lo recibe sale de la sesión, no de lo que mande el cliente.
+  if (req.body && typeof req.body === 'object') req.body.received_by = req.staffUser.username;
   const errors = validateOrder(req.body);
   if (errors.length) return res.status(400).json({ errors });
   const b = req.body;
@@ -336,7 +491,7 @@ app.post('/api/orders/:id/advance', (req, res) => {
   const toStatus = STATUSES[idx + 1];
   db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now', 'localtime') WHERE id = ?")
     .run(toStatus, req.params.id);
-  logStatusChange(row.id, row.ticket, row.status, toStatus);
+  logStatusChange(row.id, row.ticket, row.status, toStatus, req.staffUser.username);
   res.json(toPublic(db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id)));
 });
 
@@ -360,7 +515,7 @@ app.delete('/api/orders/:id', (req, res) => {
   if (row.status !== 'Recibido') {
     return res.status(409).json({ error: 'Solo se pueden eliminar órdenes en estado Recibido.' });
   }
-  logStatusChange(row.id, row.ticket, row.status, 'Eliminada');
+  logStatusChange(row.id, row.ticket, row.status, 'Eliminada', req.staffUser.username);
   db.prepare('DELETE FROM orders WHERE id = ?').run(req.params.id);
   res.json({ ok: true, ticket: row.ticket });
 });
@@ -369,6 +524,8 @@ app.delete('/api/orders/:id', (req, res) => {
 app.put('/api/orders/:id', (req, res) => {
   const existing = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Orden no encontrada.' });
+  // Quién lo recibió no se puede cambiar desde el cliente: se conserva.
+  if (req.body && typeof req.body === 'object') req.body.received_by = existing.received_by;
   const errors = validateOrder(req.body);
   if (errors.length) return res.status(400).json({ errors });
   const b = req.body;
@@ -394,7 +551,7 @@ app.put('/api/orders/:id', (req, res) => {
     req.params.id
   );
   if (status !== existing.status) {
-    logStatusChange(existing.id, existing.ticket, existing.status, status);
+    logStatusChange(existing.id, existing.ticket, existing.status, status, req.staffUser.username);
   }
   res.json(toPublic(db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id)));
 });
