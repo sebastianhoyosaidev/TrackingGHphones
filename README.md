@@ -115,3 +115,4 @@ WAL sidecar files (`repairshop.db-wal`, `repairshop.db-shm`) are recreated autom
 
 - All UI text is in Spanish, matching the shop's counter workflow.
 - Blu mascot slots are intentional placeholders (`blu-slot-header`, `blu-slot-intake` in the HTML/CSS) — replace with the real mascot image when available.
+- `npm audit` is blocked by the sandbox network proxy (403 `policy_denied` on the npm security endpoint, verified 2026-10-16). Run it from an unrestricted network before any production deploy, and deploy with `npm ci`. Manual review 2026-10-16: `express 4.22.3` and `qs 6.16.0` are current; no applicable CVEs found by hand.

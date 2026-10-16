@@ -12,5 +12,5 @@
     "start:local": "node --env-file=.env server.js",
     "backup": "node backup.js"
   },
-  "version": "1.1.0"
+  "version": "1.2.0"
 }

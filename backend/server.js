@@ -134,6 +134,9 @@ db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_customer_code ON orders(cu
 // En local: ponlas en backend/.env (gitignored) y corre `npm run start:local`.
 const SESSION_COOKIE = 'gh_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 horas
+// B-8: tope de sesiones activas por usuario (un taller usa varios
+// dispositivos; 10 es amplio y evita acumulación indefinida).
+const MAX_SESSIONS_PER_USER = 10;
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
@@ -165,6 +168,17 @@ function createSession(userId, username) {
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString().slice(0, 19).replace('T', ' ');
   db.prepare('INSERT INTO staff_sessions (token_hash, user_id, username, expires_at) VALUES (?, ?, ?, ?)')
     .run(tokenHash, userId, username, expiresAt);
+  // B-8: poda las sesiones más viejas si se supera el tope por usuario.
+  db.prepare(`
+    DELETE FROM staff_sessions
+    WHERE user_id = ?
+      AND token_hash NOT IN (
+        SELECT token_hash FROM staff_sessions
+        WHERE user_id = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?
+      )
+  `).run(userId, userId, MAX_SESSIONS_PER_USER);
   return token;
 }
 
@@ -207,7 +221,8 @@ function requireAuth(req, res, next) {
     return;
   }
   db.prepare('INSERT INTO staff_users (username, password_hash) VALUES (?, ?)').run(u, hashPassword(p));
-  console.log(`Admin inicial creado: "${u}".`);
+  // B-5: no se registra el identificador del admin en el log.
+  console.log('Admin inicial creado.');
 })();
 
 // Anti-fuerza-bruta en el login: 10 intentos/min por IP.
@@ -217,14 +232,27 @@ const loginRateLimit = makeRateLimiter({
   message: 'Demasiados intentos. Espera un minuto.',
 });
 
+// Bandera de modo desarrollo para el frontend. El botón "Rellenar datos de
+// prueba" solo existe fuera de producción (B-1). No expone nada sensible.
+app.get('/api/config', (req, res) => {
+  res.json({ devMode: process.env.NODE_ENV !== 'production' });
+});
+
 app.post('/api/login', loginRateLimit, (req, res) => {
   const { username, password } = req.body || {};
   if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
     return res.status(401).json({ error: 'Credenciales inválidas.' });
   }
   const user = db.prepare('SELECT * FROM staff_users WHERE username = ?').get(username.trim());
+  if (!user) {
+    // B-4: corre un scrypt dummy con salt aleatoria para que el tiempo de
+    // respuesta no revele si el usuario existe (antes se respondía más
+    // rápido al no pasar por scrypt). Mensaje genérico igual que abajo.
+    crypto.scryptSync(password, crypto.randomBytes(16), 64);
+    return res.status(401).json({ error: 'Credenciales inválidas.' });
+  }
   // Mensaje genérico a propósito: no revela si el usuario existe.
-  if (!user || !verifyPassword(password, user.password_hash)) {
+  if (!verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ error: 'Credenciales inválidas.' });
   }
   const token = createSession(user.id, user.username);
@@ -372,6 +400,12 @@ function validateOrder(body) {
   return errors;
 }
 
+// B-9: escapa los comodines de LIKE (\, %, _) para que se busquen como
+// texto literal y no alteren los resultados de la búsqueda.
+function escapeLike(s) {
+  return s.replace(/[\\%_]/g, c => '\\' + c);
+}
+
 // List orders (search + status filter)
 app.get('/api/orders', (req, res) => {
   const { search = '', status = '' } = req.query;
@@ -383,14 +417,24 @@ app.get('/api/orders', (req, res) => {
     params.push(status);
   }
   if (search.trim()) {
-    clauses.push('(customer_name LIKE ? OR ticket LIKE ? OR model LIKE ? OR phone LIKE ?)');
-    const like = `%${search.trim()}%`;
+    const likeCols = ['customer_name', 'ticket', 'model', 'phone']
+      .map(c => `${c} LIKE ? ESCAPE '\\'`).join(' OR ');
+    clauses.push(`(${likeCols})`);
+    const like = `%${escapeLike(search.trim())}%`;
     params.push(like, like, like, like);
   }
   if (clauses.length) sql += ' WHERE ' + clauses.join(' AND ');
   sql += ' ORDER BY id DESC';
   const rows = db.prepare(sql).all(...params).map(toPublic);
   res.json(rows);
+});
+
+// Una sola orden por id (para edición). Protegido con requireAuth como el
+// resto de /api/orders/* (B-2: openEdit ya no descarga todas las órdenes).
+app.get('/api/orders/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Orden no encontrada.' });
+  res.json(toPublic(row));
 });
 
 // Create order
@@ -530,6 +574,14 @@ app.put('/api/orders/:id', (req, res) => {
   if (errors.length) return res.status(400).json({ errors });
   const b = req.body;
   const status = STATUSES.includes(b.status) ? b.status : existing.status;
+  // B-3: la máquina de estados se impone en el servidor. Solo se permite
+  // quedarse en el mismo estado o avanzar; las regresiones (p. ej.
+  // Entregado -> Recibido) se rechazan porque casi siempre son un error.
+  const fromIdx = STATUSES.indexOf(existing.status);
+  const toIdx = STATUSES.indexOf(status);
+  if (fromIdx >= 0 && toIdx >= 0 && toIdx < fromIdx) {
+    return res.status(400).json({ error: 'No se puede devolver una orden a un estado anterior.' });
+  }
   db.prepare(`
     UPDATE orders SET
       customer_name = ?, phone = ?, device_type = ?, model = ?, imei = ?,

@@ -134,20 +134,36 @@ buildChips('e-device-type', ['iPhone', 'Samsung', 'Otro']);
 buildChips('e-problems', PROBLEMS, { multi: true, onChange: () => toggleDiag('e-problems', 'e-diag-wrap') });
 buildChips('e-arrival', ARRIVAL, { multi: true });
 
-// ---------- Rellenar datos de prueba ----------
-document.getElementById('btn-fill-test').addEventListener('click', () => {
-  document.getElementById('f-name').value = 'Test User';
-  document.getElementById('f-phone').value = '300-000-0000';
-  setSelected('f-device-type', ['iPhone']);
-  document.getElementById('f-model').value = 'Modelo de Prueba';
-  document.getElementById('f-imei').value = '000000000000000';
-  setSelected('f-problems', ['Pantalla partida']);
-  toggleDiag('f-problems', 'diag-wrap');
-  setSelected('f-arrival', ['Golpes visibles']);
-  document.getElementById('f-received-by').value = 'Técnico de Prueba';
-  document.getElementById('f-agreement').value = 'Datos de prueba — borrar después';
-  document.getElementById('f-diagnostic').value = '';
-});
+// ---------- Rellenar datos de prueba (solo en desarrollo, B-1) ----------
+// El botón solo se muestra cuando el servidor corre fuera de producción
+// (NODE_ENV !== 'production', ver /api/config). En producción se elimina del
+// DOM para que el personal no pueda crear órdenes basura.
+(function initTestButton() {
+  const btn = document.getElementById('btn-fill-test');
+  if (!btn) return;
+  const wireButton = () => {
+    btn.addEventListener('click', () => {
+      document.getElementById('f-name').value = 'Test User';
+      document.getElementById('f-phone').value = '300-000-0000';
+      setSelected('f-device-type', ['iPhone']);
+      document.getElementById('f-model').value = 'Modelo de Prueba';
+      document.getElementById('f-imei').value = '000000000000000';
+      setSelected('f-problems', ['Pantalla partida']);
+      toggleDiag('f-problems', 'diag-wrap');
+      setSelected('f-arrival', ['Golpes visibles']);
+      document.getElementById('f-received-by').value = 'Técnico de Prueba';
+      document.getElementById('f-agreement').value = 'Datos de prueba — borrar después';
+      document.getElementById('f-diagnostic').value = '';
+    });
+  };
+  fetch('/api/config')
+    .then(r => (r.ok ? r.json() : { devMode: false }))
+    .then(cfg => {
+      if (cfg && cfg.devMode === true) wireButton();
+      else btn.remove(); // fail closed: sin confirmación de dev, se oculta
+    })
+    .catch(() => btn.remove());
+})();
 
 // ---------- Scroll + foco al primer campo inválido ----------
 function focusFirstInvalid(prefix) {
@@ -309,9 +325,11 @@ function esc(s) {
 // ---------- Edit ----------
 let editingId = null;
 async function openEdit(id) {
-  const orders = await (await api('/api/orders')).json();
-  const o = orders.find(x => String(x.id) === String(id));
-  if (!o) return;
+  // B-2: trae solo la orden a editar, no toda la lista.
+  const r = await api('/api/orders/' + encodeURIComponent(id));
+  if (!r.ok) return;
+  const o = await r.json();
+  if (!o || !o.id) return;
   editingId = o.id;
   document.getElementById('edit-ticket').textContent = o.ticket;
   document.getElementById('e-name').value = o.customer_name;
