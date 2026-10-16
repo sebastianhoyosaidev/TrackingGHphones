@@ -10,6 +10,16 @@ function showLogin() {
   document.getElementById('main-tabs').classList.add('hidden');
   document.querySelectorAll('main .view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-login').classList.add('active');
+  // Login fluido: usuario recordado + foco directo (2 toques para entrar).
+  try {
+    const remembered = localStorage.getItem('gh_remembered_user');
+    if (remembered) {
+      document.getElementById('login-user').value = remembered;
+      document.getElementById('login-pass').focus();
+    } else {
+      document.getElementById('login-user').focus();
+    }
+  } catch { /* almacenamiento no disponible: se ignora */ }
 }
 function showApp(username) {
   currentUser = username;
@@ -52,7 +62,9 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
       return;
     }
     document.getElementById('login-pass').value = '';
-    showApp((await r.json()).username);
+    const username = (await r.json()).username;
+    try { localStorage.setItem('gh_remembered_user', username); } catch { /* sin almacenamiento */ }
+    showApp(username);
   } catch {
     err.textContent = 'No se pudo conectar con el servidor.';
     err.classList.remove('hidden');
@@ -277,7 +289,7 @@ async function loadOrders() {
         <p class="order-meta">${esc(o.device_type)} · ${esc(o.model)}${o.phone ? ' · ' + esc(o.phone) : ''}</p>
         <div class="order-problems">${o.problems.map(p => `<span class="tag">${esc(p)}</span>`).join('')}</div>
         ${o.diagnostic_note ? `<p class="order-meta"><strong>Cliente dice:</strong> ${esc(o.diagnostic_note)}</p>` : ''}
-        <p class="order-meta">Recibió: ${esc(o.received_by)} · ${esc(o.created_at.slice(0, 16).replace('T', ' '))}</p>
+        <p class="order-meta"><span class="received-by">Recibió: ${esc(o.received_by)}</span> · ${esc(o.created_at.slice(0, 16).replace('T', ' '))}</p>
         <div class="order-actions">
           ${canAdvance ? `<button class="btn-advance" data-id="${o.id}">${esc(NEXT_LABEL[o.status])}</button>` : ''}
           <button class="btn-edit" data-id="${o.id}">Editar</button>

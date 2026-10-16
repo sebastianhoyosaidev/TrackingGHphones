@@ -1,10 +1,12 @@
-/* Geeks Hollywood — Órdenes de Reparación */
+/* Geeks Hollywood — Órdenes de Reparación (rediseño v2: colores reales de la marca) */
 :root {
-  --brand-blue: #3399ff;
-  --brand-blue-dark: #1f7fd6;
+  --brand-orange: #F05228;      /* naranja del logo y letrero */
+  --brand-orange-dark: #C7431F;
+  --brand-blue: #2B5FA6;        /* azul de puerta y vitrinas */
+  --brand-blue-dark: #20497F;
   --brand-red: #ef3f56;
-  --navy: #0d1b2e;
-  --navy-2: #12263f;
+  --navy: #0B0B0C;              /* negro del logo */
+  --navy-2: #17171A;
   --bg: #f2f5f9;
   --card: #ffffff;
   --text: #1c2733;
@@ -24,7 +26,8 @@ body {
 
 /* ---------- Header ---------- */
 .brand-band {
-  background: linear-gradient(135deg, var(--navy) 0%, var(--navy-2) 100%);
+  background: var(--navy);
+  border-bottom: 3px solid var(--brand-orange);
   color: #fff;
   display: flex;
   align-items: center;
@@ -58,7 +61,7 @@ body {
   padding: 14px 8px; font-size: 1rem; cursor: pointer;
   border-bottom: 3px solid transparent;
 }
-.tab.active { color: #fff; border-bottom-color: var(--brand-blue); font-weight: 600; }
+.tab.active { color: #fff; border-bottom-color: var(--brand-orange); font-weight: 600; }
 
 /* ---------- Layout ---------- */
 main { max-width: 720px; margin: 0 auto; padding: 18px 14px 60px; }
@@ -71,8 +74,8 @@ main { max-width: 720px; margin: 0 auto; padding: 18px 14px 60px; }
 /* ---------- Blu placeholder (intake) ---------- */
 .blu-slot-intake {
   border: 2px dashed var(--brand-blue);
-  background: #e8f3ff;
-  color: #2a5f9e;
+  background: #e9eff8;
+  color: var(--brand-blue-dark);
   border-radius: var(--radius);
   padding: 18px;
   text-align: center;
@@ -89,7 +92,7 @@ input[type="text"], input[type="tel"], input[type="search"], textarea, select {
   border: 1.5px solid var(--border); border-radius: var(--radius);
   font-size: 1rem; font-family: inherit; background: #fff; color: var(--text);
 }
-input:focus, textarea:focus, select:focus { outline: none; border-color: var(--brand-blue); box-shadow: 0 0 0 3px rgba(51,153,255,.15); }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--brand-orange); box-shadow: 0 0 0 3px rgba(240,82,40,.18); }
 textarea { resize: vertical; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -99,15 +102,15 @@ textarea { resize: vertical; }
   transition: all .12s ease;
 }
 .chip.active {
-  background: var(--brand-blue); border-color: var(--brand-blue); color: #fff; font-weight: 600;
+  background: var(--brand-orange); border-color: var(--brand-orange); color: #fff; font-weight: 600;
 }
 
 .btn-primary {
-  width: 100%; background: var(--brand-blue); color: #fff; border: none;
+  width: 100%; background: var(--brand-orange); color: #fff; border: none;
   border-radius: var(--radius); padding: 15px; font-size: 1.05rem; font-weight: 700;
   cursor: pointer;
 }
-.btn-primary:hover { background: var(--brand-blue-dark); }
+.btn-primary:hover { background: var(--brand-orange-dark); }
 .btn-secondary {
   background: #e7edf4; color: var(--text); border: none;
   border-radius: var(--radius); padding: 15px 20px; font-size: 1rem; font-weight: 600; cursor: pointer;
@@ -119,7 +122,7 @@ textarea { resize: vertical; }
 .success-sub { color: var(--muted); margin: 8px 0 4px; }
 .ticket-big {
   font-size: 3.2rem; font-weight: 800; letter-spacing: 2px;
-  color: var(--navy); background: #fff; border: 3px solid var(--brand-blue);
+  color: var(--navy); background: #fff; border: 3px solid var(--brand-orange);
   border-radius: 18px; padding: 22px; margin: 12px 0 22px;
 }
 
@@ -135,20 +138,21 @@ textarea { resize: vertical; }
 .status-badge {
   font-size: .8rem; font-weight: 700; padding: 5px 12px; border-radius: 999px; white-space: nowrap;
 }
-.status-Recibido { background: #e8f3ff; color: #1f7fd6; }
+.status-Recibido { background: #e3ecf7; color: var(--brand-blue); }
 .status-En\ reparación { background: #fff4d6; color: #9a6b00; }
 .status-Listo { background: #e3f7ec; color: #1d9e57; }
 .status-Entregado { background: #eceff3; color: var(--muted); }
 .order-name { font-weight: 600; margin: 8px 0 2px; }
 .order-meta { color: var(--muted); font-size: .9rem; margin: 2px 0; }
+.received-by { color: var(--brand-blue); font-weight: 700; }
 .order-problems { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .tag { background: #eef4fb; border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: .8rem; }
 .order-actions { display: flex; gap: 8px; margin-top: 10px; }
 .btn-advance {
-  flex: 1; background: var(--brand-blue); color: #fff; border: none;
+  flex: 1; background: var(--brand-orange); color: #fff; border: none;
   border-radius: 10px; padding: 11px; font-weight: 700; cursor: pointer; font-size: .95rem;
 }
-.btn-advance:hover { background: var(--brand-blue-dark); }
+.btn-advance:hover { background: var(--brand-orange-dark); }
 .btn-edit {
   background: #e7edf4; color: var(--text); border: none;
   border-radius: 10px; padding: 11px 16px; font-weight: 600; cursor: pointer; font-size: .95rem;
@@ -188,9 +192,26 @@ textarea { resize: vertical; }
 #btn-fill-test { width: 100%; margin-bottom: 10px; }
 .flash-invalid { outline: 3px solid var(--brand-red); outline-offset: 3px; border-radius: var(--radius); }
 
-/* ---------- Login ---------- */
-.login-card { max-width: 380px; margin: 48px auto; padding: 24px; border-radius: var(--radius, 12px); border: 1px solid #e2e2e2; background: #fff; }
-.login-card h2 { margin-top: 0; }
-.login-card .btn-primary { width: 100%; margin-top: 6px; }
-.user-chip { margin-left: auto; align-self: center; font-size: 0.9em; color: var(--muted); white-space: nowrap; }
-.btn-link { background: none; border: none; color: var(--brand-blue, #1a73e8); cursor: pointer; font-size: 1em; padding: 0; text-decoration: underline; }
+/* ---------- Login (rediseño v2: marca GH + login fluido) ---------- */
+.login-card {
+  max-width: 400px; margin: 40px auto; padding: 0; overflow: hidden;
+  border-radius: 16px; border: 1px solid var(--border); background: #fff;
+  box-shadow: 0 8px 28px rgba(11,11,12,.10);
+}
+.login-brand { background: var(--navy); color: #fff; text-align: center; padding: 26px 20px 20px; }
+.login-brand .gh { font-weight: 800; font-size: 1.45rem; letter-spacing: .05em; }
+.login-brand .gh span { color: var(--brand-orange); }
+.login-brand p { margin: 6px 0 0; font-size: .8rem; color: #9aa0a6; }
+.login-body { padding: 22px; }
+.login-body h2 { margin: 0 0 4px; }
+.login-body input[type="text"], .login-body input[type="password"] {
+  padding: 15px; font-size: 1.05rem; /* blancos grandes para dedo en mostrador */
+}
+.login-card .btn-primary { width: 100%; margin-top: 8px; min-height: 56px; font-size: 1.12rem; }
+.remember-note { text-align: center; font-size: .8rem; color: var(--muted); margin: 12px 0 0; }
+.user-chip {
+  margin-left: auto; align-self: center; font-size: 0.9em; white-space: nowrap;
+  background: var(--brand-blue); color: #fff; font-weight: 600;
+  border-radius: 999px; padding: 6px 12px;
+}
+.btn-link { background: none; border: none; color: #fff; cursor: pointer; font-size: 1em; padding: 0; text-decoration: underline; }
