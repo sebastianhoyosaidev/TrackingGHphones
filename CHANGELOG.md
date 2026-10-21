@@ -3,6 +3,55 @@
 Notas de cada versión publicada. El código vive en este repo privado;
 la app de verdad corre en el servidor (Oracle Cloud).
 
+## v1.3.0 — 2026-10-21 — Panel operativo, asignación y reportes
+
+**Panel de operaciones**
+- Nueva sección inicial después del inicio de sesión, con tarjetas para órdenes
+  creadas hoy, abiertas, en reparación, listas, entregadas hoy, envejecidas,
+  con promesa vencida y esperando recogida.
+- Filtros por rango de fechas, estado, técnico, tipo de equipo y granularidad
+  diaria, semanal o mensual.
+- Gráficos ligeros basados en barras accesibles, sin añadir librerías. Cada
+  barra lleva a la lista de órdenes con los filtros correspondientes.
+- Gráficos para órdenes creadas, estados, carga y entregas por técnico, tipos
+  de equipo, problemas frecuentes, antigüedad, espera para recogida y mediana
+  del tiempo de reparación.
+- Exportación CSV de la lista que coincide con los filtros del panel.
+- Estados visibles de carga, falta de datos y error; diseño adaptable a móvil,
+  tableta y escritorio.
+
+**Técnicos y flujo**
+- Lista fija de técnicos Fabio, Oliver, Sebastian, Fernando, Maria y Elder;
+  asignación opcional separada de `received_by` y editable en la orden.
+- Fecha prometida opcional, con validación del lado servidor y detección de
+  vencimiento cuando una orden no entregada ya pasó la fecha.
+- Historial común de creación, cambios de estado y asignaciones, con actor y
+  marca de tiempo. La tarjeta de orden muestra el historial bajo demanda y la
+  fecha desde que está en el estado actual.
+- Actualizaciones de orden, estado, auditoría y eventos dentro de transacciones
+  SQLite para evitar que los datos y su registro queden desincronizados.
+
+**Migración y métricas**
+- Migración aditiva al iniciar: agrega `assigned_technician`, `promised_at` y
+  `order_events`, e importa las fechas de `audit_log` de forma idempotente.
+- Órdenes existentes quedan sin asignación ni fecha prometida. No se infieren
+  técnicos históricos a partir de `received_by`.
+- Envejecimiento definido como 72 horas abierta; espera de recogida como 48
+  horas en `Listo`; reparación como tiempo entre recepción y transición a
+  `Entregado`. El reporte por técnico solo atribuye cierres con asignación
+  guardada al momento de entrega.
+- Nueva guía de migración y reversión en `MIGRATIONS.md`.
+
+**Revisión general del código**
+- `npm start` usa `backend/start.js` para establecer modo producción de forma
+  portable en Windows, macOS y Linux.
+- Se agregó `backend/.env.example`, que faltaba aunque README indicaba copiarlo.
+- Las cookies malformadas se ignoran con seguridad; el rate limiter limpia IPs
+  inactivas periódicamente y devuelve `Retry-After` al limitar solicitudes.
+- Se corrigieron las clases CSS del estado `En reparación` y se reforzó el
+  contraste de las etiquetas de estado.
+- No se añadieron dependencias de visualización ni cuentas de técnicos.
+
 ## v1.2.0 — 2026-10-09 — Robustez del servidor y herramientas de taller
 
 **Formulario de recepción**

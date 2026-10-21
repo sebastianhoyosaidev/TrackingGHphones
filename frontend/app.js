@@ -27,12 +27,13 @@ function showApp(username) {
   document.getElementById('main-tabs').classList.remove('hidden');
   document.getElementById('user-name').textContent = username;
   document.querySelectorAll('main .view').forEach(v => v.classList.remove('active'));
-  document.getElementById('view-intake').classList.add('active');
-  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === 'intake'));
+  document.getElementById('view-dashboard').classList.add('active');
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === 'dashboard'));
   // Quién lo recibe sale de la sesión (el servidor lo impone de todos modos).
   const rb = document.getElementById('f-received-by');
   rb.value = username;
   rb.readOnly = true;
+  loadDashboard();
 }
 async function checkSession() {
   try {
@@ -90,6 +91,35 @@ const NEXT_LABEL = {
   'En reparación': 'Marcar como Listo',
   'Listo': 'Marcar como Entregado'
 };
+const TECHNICIANS = ['Fabio', 'Oliver', 'Sebastian', 'Fernando', 'Maria', 'Elder'];
+
+function fillTechnicianOptions() {
+  for (const id of ['f-technician', 'e-technician', 'dash-technician', 'orders-technician']) {
+    const select = document.getElementById(id);
+    if (!select) continue;
+    const first = select.options[0];
+    select.replaceChildren(first);
+    TECHNICIANS.forEach(name => {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      select.appendChild(option);
+    });
+  }
+}
+fillTechnicianOptions();
+
+function localDateInput(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+const todayForInput = new Date();
+document.getElementById('dash-to').value = localDateInput(todayForInput);
+const monthAgo = new Date(todayForInput);
+monthAgo.setDate(monthAgo.getDate() - 29);
+document.getElementById('dash-from').value = localDateInput(monthAgo);
 
 // ---------- Tabs ----------
 document.querySelectorAll('.tab').forEach(btn => {
@@ -99,6 +129,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('view-' + btn.dataset.view).classList.add('active');
     if (btn.dataset.view === 'orders') loadOrders();
+    if (btn.dataset.view === 'dashboard') loadDashboard();
   });
 });
 
@@ -217,6 +248,8 @@ document.getElementById('intake-form').addEventListener('submit', async (e) => {
     problems,
     arrival_condition: getSelected('f-arrival'),
     received_by: document.getElementById('f-received-by').value,
+    assigned_technician: document.getElementById('f-technician').value,
+    promised_at: document.getElementById('f-promised-at').value,
     agreement: document.getElementById('f-agreement').value,
     diagnostic_note: document.getElementById('f-diagnostic').value
   };
@@ -245,6 +278,7 @@ document.getElementById('intake-form').addEventListener('submit', async (e) => {
 
 document.getElementById('btn-new-order').addEventListener('click', () => {
   document.getElementById('intake-form').reset();
+  document.getElementById('f-received-by').value = currentUser || '';
   ['f-device-type', 'f-problems', 'f-arrival'].forEach(id => setSelected(id, []));
   toggleDiag('f-problems', 'diag-wrap');
   document.getElementById('ticket-success').classList.add('hidden');
@@ -254,6 +288,20 @@ document.getElementById('btn-new-order').addEventListener('click', () => {
 // ---------- Orders list ----------
 let currentStatusFilter = '';
 document.getElementById('orders-search').addEventListener('input', loadOrders);
+for (const id of ['orders-from', 'orders-to', 'orders-technician', 'orders-device', 'orders-problem']) {
+  document.getElementById(id).addEventListener('change', loadOrders);
+}
+document.getElementById('orders-clear-filters').addEventListener('click', () => {
+  document.getElementById('orders-search').value = '';
+  ['orders-from', 'orders-to', 'orders-technician', 'orders-device', 'orders-problem'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned']
+    .forEach(key => delete document.getElementById('orders-list').dataset[key]);
+  currentStatusFilter = '';
+  document.querySelectorAll('#status-filter .chip').forEach(b => b.classList.toggle('active', b.dataset.value === ''));
+  loadOrders();
+});
 document.querySelectorAll('#status-filter .chip').forEach(b => {
   b.addEventListener('click', () => {
     document.querySelectorAll('#status-filter .chip').forEach(x => x.classList.remove('active'));
@@ -267,10 +315,20 @@ async function loadOrders() {
   const list = document.getElementById('orders-list');
   const q = new URLSearchParams({
     search: document.getElementById('orders-search').value,
-    status: currentStatusFilter
+    status: currentStatusFilter,
+    from: document.getElementById('orders-from').value,
+    to: document.getElementById('orders-to').value,
+    technician: document.getElementById('orders-technician').value,
+    device_type: document.getElementById('orders-device').value,
+    problem: document.getElementById('orders-problem').value.trim()
   });
+  ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned']
+    .forEach(key => { if (list.dataset[key]) q.set(key, list.dataset[key]); });
+  list.innerHTML = '<p class="empty">Cargando órdenes…</p>';
   try {
-    const orders = await (await api('/api/orders?' + q)).json();
+    const response = await api('/api/orders?' + q);
+    if (!response.ok) throw new Error('No se pudieron cargar las órdenes.');
+    const orders = await response.json();
     if (!orders.length) {
       list.innerHTML = '<p class="empty">No hay órdenes aquí todavía.</p>';
       return;
@@ -283,28 +341,63 @@ async function loadOrders() {
       card.innerHTML = `
         <div class="order-top">
           <span class="order-ticket">${esc(o.ticket)}</span>
-          <span class="status-badge status-${esc(o.status)}">${esc(o.status)}</span>
+          <span class="status-badge ${statusCssClass(o.status)}">${esc(o.status)}</span>
         </div>
         <p class="order-name">${esc(o.customer_name)}</p>
         <p class="order-meta">${esc(o.device_type)} · ${esc(o.model)}${o.phone ? ' · ' + esc(o.phone) : ''}</p>
         <div class="order-problems">${o.problems.map(p => `<span class="tag">${esc(p)}</span>`).join('')}</div>
         ${o.diagnostic_note ? `<p class="order-meta"><strong>Cliente dice:</strong> ${esc(o.diagnostic_note)}</p>` : ''}
+        <p class="order-meta"><strong>Técnico:</strong> ${o.assigned_technician ? esc(o.assigned_technician) : 'Sin asignar'}${o.promised_at ? ` · <strong>Prometida:</strong> ${esc(o.promised_at)}` : ''}</p>
         <p class="order-meta"><span class="received-by">Recibió: ${esc(o.received_by)}</span> · ${esc(o.created_at.slice(0, 16).replace('T', ' '))}</p>
+        ${o.status_changed_at ? `<p class="order-meta">${esc(o.status)} desde ${esc(o.status_changed_at.slice(0, 16))}</p>` : ''}
         <div class="order-actions">
           ${canAdvance ? `<button class="btn-advance" data-id="${o.id}">${esc(NEXT_LABEL[o.status])}</button>` : ''}
+          <button class="btn-history" type="button" data-id="${o.id}" aria-expanded="false">Historial</button>
           <button class="btn-edit" data-id="${o.id}">Editar</button>
           ${o.status === 'Recibido' ? `<button class="btn-delete" data-id="${o.id}">Eliminar</button>` : ''}
-        </div>`;
+        </div>
+        <div class="order-history hidden" id="order-history-${o.id}" aria-live="polite"></div>`;
       list.appendChild(card);
     });
     list.querySelectorAll('.btn-advance').forEach(b =>
       b.addEventListener('click', () => advanceOrder(b.dataset.id)));
     list.querySelectorAll('.btn-edit').forEach(b =>
       b.addEventListener('click', () => openEdit(b.dataset.id)));
+    list.querySelectorAll('.btn-history').forEach(b =>
+      b.addEventListener('click', () => toggleOrderHistory(b)));
     list.querySelectorAll('.btn-delete').forEach(b =>
       b.addEventListener('click', () => deleteOrder(b.dataset.id)));
   } catch {
     list.innerHTML = '<p class="empty">No se pudo cargar. Revisa la conexión.</p>';
+  }
+}
+
+async function toggleOrderHistory(button) {
+  const box = document.getElementById('order-history-' + button.dataset.id);
+  const opening = box.classList.contains('hidden');
+  box.classList.toggle('hidden', !opening);
+  button.setAttribute('aria-expanded', String(opening));
+  if (!opening || box.dataset.loaded === 'true') return;
+  box.textContent = 'Cargando historial…';
+  try {
+    const response = await api('/api/orders/' + encodeURIComponent(button.dataset.id) + '/history');
+    if (!response.ok) throw new Error('No se pudo cargar el historial.');
+    const events = await response.json();
+    box.innerHTML = events.map(event => {
+      const at = esc(String(event.created_at || '').slice(0, 16));
+      let message = '';
+      if (event.event_type === 'status') {
+        message = event.from_status ? `Estado: ${esc(event.from_status)} → ${esc(event.to_status)}` : `Orden recibida: ${esc(event.to_status)}`;
+      } else if (event.event_type === 'technician_assigned') {
+        message = event.assigned_technician
+          ? `Técnico asignado: ${esc(event.previous_technician || 'Sin asignar')} → ${esc(event.assigned_technician)}`
+          : `Asignación retirada: ${esc(event.previous_technician || 'Sin asignar')}`;
+      } else message = 'Actualización de orden';
+      return `<p class="history-event"><strong>${message}</strong><span>${at} · ${esc(event.actor || 'sistema')}</span></p>`;
+    }).join('') || '<p class="muted">Sin eventos registrados.</p>';
+    box.dataset.loaded = 'true';
+  } catch (error) {
+    box.textContent = error.message || 'No se pudo cargar el historial.';
   }
 }
 
@@ -334,6 +427,10 @@ function esc(s) {
   }[c]));
 }
 
+function statusCssClass(status) {
+  return ({ 'Recibido': 'status-received', 'En reparación': 'status-repair', 'Listo': 'status-ready', 'Entregado': 'status-delivered' })[status] || 'status-unknown';
+}
+
 // ---------- Edit ----------
 let editingId = null;
 async function openEdit(id) {
@@ -349,6 +446,8 @@ async function openEdit(id) {
   document.getElementById('e-model').value = o.model;
   document.getElementById('e-imei').value = o.imei || '';
   document.getElementById('e-received-by').value = o.received_by;
+  document.getElementById('e-technician').value = o.assigned_technician || '';
+  document.getElementById('e-promised-at').value = o.promised_at || '';
   document.getElementById('e-agreement').value = o.agreement;
   document.getElementById('e-diagnostic').value = o.diagnostic_note || '';
   document.getElementById('e-status').value = o.status;
@@ -380,6 +479,8 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
     problems: getSelected('e-problems'),
     arrival_condition: getSelected('e-arrival'),
     received_by: document.getElementById('e-received-by').value,
+    assigned_technician: document.getElementById('e-technician').value,
+    promised_at: document.getElementById('e-promised-at').value,
     agreement: document.getElementById('e-agreement').value,
     diagnostic_note: document.getElementById('e-diagnostic').value,
     status: document.getElementById('e-status').value
@@ -424,7 +525,7 @@ async function doLookup() {
     }
     const o = await r.json();
     box.innerHTML = `
-      <div class="lookup-status status-${esc(o.status)}">${esc(o.status)}</div>
+      <div class="lookup-status ${statusCssClass(o.status)}">${esc(o.status)}</div>
       <p><strong>Ticket:</strong> ${esc(o.ticket)}</p>
       <p><strong>Cliente:</strong> ${esc(o.customer_name)}</p>
       <p><strong>Equipo:</strong> ${esc(o.device_type)} ${esc(o.model)}</p>
@@ -439,4 +540,204 @@ async function doLookup() {
 document.getElementById('btn-lookup').addEventListener('click', doLookup);
 document.getElementById('lookup-ticket').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') doLookup();
+});
+
+// ---------- Panel operativo ----------
+document.getElementById('dashboard-filters').addEventListener('submit', e => {
+  e.preventDefault();
+  loadDashboard();
+});
+
+function dashboardQuery() {
+  return new URLSearchParams({
+    from: document.getElementById('dash-from').value,
+    to: document.getElementById('dash-to').value,
+    status: document.getElementById('dash-status').value,
+    technician: document.getElementById('dash-technician').value,
+    device_type: document.getElementById('dash-device').value,
+    interval: document.getElementById('dash-interval').value
+  });
+}
+
+function updateDeviceOptions(deviceTypes) {
+  for (const [id, emptyLabel] of [['dash-device', 'Todos los equipos'], ['orders-device', 'Todos los equipos']]) {
+    const select = document.getElementById(id);
+    const oldValue = select.value;
+    select.replaceChildren(new Option(emptyLabel, ''));
+    deviceTypes.forEach(type => select.add(new Option(type, type)));
+    if (deviceTypes.includes(oldValue)) select.value = oldValue;
+  }
+}
+
+async function loadDashboard() {
+  const state = document.getElementById('dashboard-state');
+  const content = document.getElementById('dashboard-content');
+  state.textContent = 'Cargando datos del taller…';
+  state.classList.remove('error');
+  content.classList.add('hidden');
+  try {
+    const response = await api('/api/dashboard?' + dashboardQuery());
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'No se pudo cargar el panel.');
+    updateDeviceOptions(data.deviceTypes || []);
+    renderDashboard(data);
+    content.classList.remove('hidden');
+    state.textContent = data.created.length ? '' : 'No hay órdenes en el período seleccionado.';
+  } catch (error) {
+    state.textContent = error.message || 'No se pudo cargar el panel. Revisa la conexión.';
+    state.classList.add('error');
+  }
+}
+
+function renderDashboard(data) {
+  const items = [
+    ['Órdenes creadas hoy', data.summary.createdToday, false],
+    ['Órdenes abiertas', data.summary.open, false],
+    ['En reparación', data.summary.inRepair, false],
+    ['Listas para recoger', data.summary.ready, false],
+    ['Entregadas hoy', data.summary.deliveredToday, false],
+    ['Abiertas 3 días o más', data.summary.aging, true],
+    ['Promesa vencida', data.summary.overdue, true],
+    ['Listas esperando 48 h o más', data.summary.waitingPickup, true]
+  ];
+  document.getElementById('dashboard-kpis').innerHTML = items.map(([label, value, alert]) => `
+    <div class="kpi-card${alert && value ? ' alert' : ''}"><span class="kpi-label">${esc(label)}</span>
+      <strong class="kpi-value">${Number(value) || 0}</strong></div>`).join('');
+
+  const base = {
+    from: document.getElementById('dash-from').value,
+    to: document.getElementById('dash-to').value,
+    status: document.getElementById('dash-status').value,
+    technician: document.getElementById('dash-technician').value,
+    device_type: document.getElementById('dash-device').value
+  };
+  const withBase = extra => ({ ...base, ...extra });
+  renderBars('chart-created', data.created, x => withBase({ from: x.from, to: x.to }));
+  renderBars('chart-status', data.statuses, x => withBase({ status: x.label }));
+
+  const technicianChart = document.getElementById('chart-technicians');
+  technicianChart.replaceChildren();
+  appendChartSection(technicianChart, 'Pendientes por técnico', data.technicians,
+    x => withBase({ from: '', to: '', technician: x.label === 'Sin asignar' ? '' : x.label,
+      open_only: '1', unassigned: x.label === 'Sin asignar' ? '1' : '' }), x => x.value, 'órdenes');
+  appendChartSection(technicianChart, 'Entregadas por técnico', data.technicians,
+    x => withBase({ from: '', to: '', technician: '', status: 'Entregado',
+      completed_technician: x.label === 'Sin asignar' ? '' : x.label,
+      completed_unassigned: x.label === 'Sin asignar' ? '1' : '',
+      completed_from: base.from, completed_to: base.to }), x => x.completed, 'órdenes');
+
+  renderBars('chart-devices', data.devices, x => withBase({ device_type: x.label }));
+  renderBars('chart-issues', data.issues, x => withBase({ problem: x.label }));
+  const agingKeys = ['0_1', '2_3', '4_7', '8_plus'];
+  renderBars('chart-aging', data.aging, (x, i) => withBase({ from: '', to: '', status: '', aging_bucket: agingKeys[i], open_only: '1' }));
+  const pickupKeys = ['under_24', '1_2', '2_3', '3_plus'];
+  renderBars('chart-pickup', data.pickupWaiting, (x, i) => withBase({ from: '', to: '', status: 'Listo', pickup_bucket: pickupKeys[i] }));
+  const turnaroundItems = data.turnaround.byTechnician.filter(x => x.count > 0).map(x => ({
+    ...x, label: `${x.label} · ${x.count}`, display: `${x.value} h`, value: x.value
+  }));
+  document.getElementById('turnaround-summary').textContent = data.turnaround.medianHours === null
+    ? 'Sin entregas con marcas de tiempo válidas en este período.'
+    : `Mediana general: ${Math.round(data.turnaround.medianHours * 10) / 10} h · ${data.turnaround.completedCount} entregas.`;
+  renderBars('chart-turnaround', turnaroundItems, x => withBase({ from: '', to: '', status: 'Entregado',
+    technician: '', completed_technician: x.label.split(' · ')[0], completed_from: base.from, completed_to: base.to }), x => x.display);
+}
+
+function appendChartSection(target, title, items, paramsFor, valueOf, valueLabel = '') {
+  const heading = document.createElement('p');
+  heading.className = 'chart-subheading';
+  heading.textContent = title;
+  target.appendChild(heading);
+  addBarRows(target, items, paramsFor, valueOf, valueLabel);
+}
+
+function renderBars(id, items, paramsFor, valueOf = item => item.value) {
+  const target = document.getElementById(id);
+  target.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bar-empty';
+    empty.textContent = 'No hay datos para mostrar.';
+    target.appendChild(empty);
+    return;
+  }
+  addBarRows(target, items, paramsFor, valueOf);
+}
+
+function addBarRows(target, items, paramsFor, valueOf = item => item.value, suffix = '') {
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bar-empty';
+    empty.textContent = 'Sin datos';
+    target.appendChild(empty);
+    return;
+  }
+  const values = items.map(item => Number(item.value) || 0);
+  const max = Math.max(1, ...values);
+  items.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'bar-row';
+    const number = Number(item.value) || 0;
+    const display = typeof valueOf(item) === 'string' ? valueOf(item) : `${number}${suffix ? ` ${suffix}` : ''}`;
+    button.setAttribute('aria-label', `Abrir órdenes: ${item.label}, ${display}`);
+    button.innerHTML = `<span class="bar-label">${esc(item.label)}</span>
+      <progress class="bar-progress" max="${max}" value="${number}" aria-hidden="true"></progress>
+      <span class="bar-value">${esc(display)}</span>`;
+    button.addEventListener('click', () => openOrdersFromChart(paramsFor(item, index)));
+    target.appendChild(button);
+  });
+}
+
+function openOrdersFromChart(params) {
+  document.getElementById('orders-search').value = '';
+  document.getElementById('orders-from').value = params.from || '';
+  document.getElementById('orders-to').value = params.to || '';
+  document.getElementById('orders-technician').value = params.technician || '';
+  document.getElementById('orders-device').value = params.device_type || '';
+  document.getElementById('orders-problem').value = params.problem || '';
+  currentStatusFilter = params.status || '';
+  document.querySelectorAll('#status-filter .chip').forEach(b => b.classList.toggle('active', b.dataset.value === currentStatusFilter));
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === 'orders'));
+  document.querySelectorAll('main .view').forEach(v => v.classList.toggle('active', v.id === 'view-orders'));
+  const query = new URLSearchParams(params);
+  const extraIds = ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned'];
+  extraIds.forEach(key => {
+    const value = query.get(key);
+    if (value) document.getElementById('orders-list').dataset[key] = value;
+    else delete document.getElementById('orders-list').dataset[key];
+  });
+  loadOrders(params);
+}
+
+document.getElementById('dashboard-export').addEventListener('click', async () => {
+  const button = document.getElementById('dashboard-export');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Preparando…';
+  try {
+    const query = dashboardQuery();
+    const response = await api('/api/orders?' + query);
+    if (!response.ok) throw new Error('No se pudo generar el reporte.');
+    const orders = await response.json();
+    const columns = [
+      ['Ticket', 'ticket'], ['Cliente', 'customer_name'], ['Teléfono', 'phone'], ['Equipo', 'device_type'],
+      ['Modelo', 'model'], ['Problemas', o => o.problems.join('; ')], ['Estado', 'status'],
+      ['Técnico asignado', 'assigned_technician'], ['Recibió', 'received_by'], ['Fecha de ingreso', 'created_at'],
+      ['Fecha prometida', 'promised_at'], ['Último cambio de estado', 'status_changed_at']
+    ];
+    const csvCell = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const csv = '\uFEFF' + [columns.map(([label]) => csvCell(label)).join(','), ...orders.map(order =>
+      columns.map(([, key]) => csvCell(typeof key === 'function' ? key(order) : order[key])).join(','))].join('\r\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `reporte-ordenes-${localDateInput(new Date())}.csv`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) {
+    alert(error.message || 'No se pudo generar el reporte.');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
 });

@@ -29,13 +29,20 @@ app.use(express.static(path.join(__dirname, '..', 'frontend')));
 //   TRACK_RATE_LIMIT_MAX (defecto 30), STAFF_RATE_LIMIT_MAX (defecto 300)
 function makeRateLimiter({ windowMs, max, message }) {
   const hits = new Map(); // ip -> marcas de tiempo
+  let sweeps = 0;
   return (req, res, next) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const now = Date.now();
     const recent = (hits.get(ip) || []).filter(t => now - t < windowMs);
     recent.push(now);
     hits.set(ip, recent);
+    if (++sweeps % 512 === 0) {
+      for (const [key, timestamps] of hits) {
+        if (!timestamps.length || now - timestamps[timestamps.length - 1] >= windowMs) hits.delete(key);
+      }
+    }
     if (recent.length > max) {
+      res.setHeader('Retry-After', String(Math.ceil(windowMs / 1000)));
       return res.status(429).json({ error: message });
     }
     next();
@@ -98,6 +105,20 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
   );
   CREATE INDEX IF NOT EXISTS idx_audit_log_order ON audit_log(order_id);
+  CREATE TABLE IF NOT EXISTS order_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL,
+    ticket TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    from_status TEXT,
+    to_status TEXT,
+    previous_technician TEXT,
+    assigned_technician TEXT,
+    actor TEXT NOT NULL DEFAULT 'staff',
+    source_audit_id INTEGER UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_order_events_order ON order_events(order_id, created_at);
   CREATE TABLE IF NOT EXISTS staff_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
@@ -112,6 +133,47 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
   );
   CREATE INDEX IF NOT EXISTS idx_staff_sessions_user ON staff_sessions(user_id);
+`);
+
+function withTransaction(work) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = work();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* conserva el error original */ }
+    throw error;
+  }
+}
+
+// Migración aditiva y segura: las órdenes anteriores conservan los campos
+// nuevos como NULL. No se asignan técnicos ni fechas prometidas a registros
+// existentes. Para las métricas de estado se aprovechan created_at y audit_log.
+const orderCols = db.prepare('PRAGMA table_info(orders)').all().map(c => c.name);
+if (!orderCols.includes('assigned_technician')) {
+  db.exec('ALTER TABLE orders ADD COLUMN assigned_technician TEXT');
+}
+if (!orderCols.includes('promised_at')) {
+  db.exec('ALTER TABLE orders ADD COLUMN promised_at TEXT');
+}
+const eventCols = db.prepare('PRAGMA table_info(order_events)').all().map(c => c.name);
+if (!eventCols.includes('previous_technician')) {
+  db.exec('ALTER TABLE order_events ADD COLUMN previous_technician TEXT');
+}
+db.exec(`
+  INSERT OR IGNORE INTO order_events
+    (order_id, ticket, event_type, from_status, to_status, actor, created_at)
+  SELECT o.id, o.ticket, 'status', NULL, 'Recibido', 'sistema', o.created_at
+  FROM orders o
+  WHERE NOT EXISTS (
+    SELECT 1 FROM order_events e WHERE e.order_id = o.id AND e.event_type = 'status'
+  );
+  INSERT OR IGNORE INTO order_events
+    (order_id, ticket, event_type, from_status, to_status, actor, source_audit_id, created_at)
+  SELECT a.order_id, a.ticket, 'status', a.from_status, a.to_status,
+         a.actor, a.id, a.created_at
+  FROM audit_log a;
 `);
 
 // Código de consulta del cliente: aleatorio e imposible de adivinar.
@@ -157,7 +219,12 @@ function parseCookies(req) {
   for (const part of header.split(';')) {
     const i = part.indexOf('=');
     if (i < 0) continue;
-    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    try {
+      out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    } catch {
+      // Ignora cookies malformadas en vez de convertir una sesión inválida
+      // en un error 500 para toda la petición.
+    }
   }
   return out;
 }
@@ -302,13 +369,24 @@ function generateCustomerCode() {
 }
 
 const STATUSES = ['Recibido', 'En reparación', 'Listo', 'Entregado'];
+const TECHNICIANS = ['Fabio', 'Oliver', 'Sebastian', 'Fernando', 'Maria', 'Elder'];
+
+function recordOrderEvent(orderId, ticket, eventType, fromStatus, toStatus, actor, assignedTechnician = null, previousTechnician = null) {
+  db.prepare(`
+    INSERT INTO order_events
+      (order_id, ticket, event_type, from_status, to_status, previous_technician, assigned_technician, actor)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(orderId, ticket, eventType, fromStatus, toStatus, previousTechnician || null,
+    assignedTechnician || null, actor || 'staff');
+}
 
 // Auditoría de cambios de estado. actor = usuario autenticado de la sesión.
-function logStatusChange(orderId, ticket, fromStatus, toStatus, actor) {
+function logStatusChange(orderId, ticket, fromStatus, toStatus, actor, assignedTechnician = null) {
   db.prepare(`
     INSERT INTO audit_log (order_id, ticket, from_status, to_status, actor)
     VALUES (?, ?, ?, ?, ?)
   `).run(orderId, ticket, fromStatus, toStatus, actor);
+  recordOrderEvent(orderId, ticket, 'status', fromStatus, toStatus, actor, assignedTechnician);
 }
 
 function nextTicket() {
@@ -338,6 +416,7 @@ const MAX_LEN = {
   received_by: 100,
   agreement: 2000,
   diagnostic_note: 2000,
+  assigned_technician: 60,
 };
 const MAX_LIST_ITEMS = 12;    // coincide con las opciones del frontend
 const MAX_LIST_ITEM_LEN = 40;
@@ -391,6 +470,16 @@ function validateOrder(body) {
   checkText(body, 'received_by', 'Quién lo recibe', { required: true, max: MAX_LEN.received_by }, errors);
   checkText(body, 'agreement', 'Qué se acordó', { required: true, max: MAX_LEN.agreement }, errors);
   checkText(body, 'diagnostic_note', 'La nota de diagnóstico', { required: false, max: MAX_LEN.diagnostic_note }, errors);
+  checkText(body, 'assigned_technician', 'El técnico asignado', { required: false, max: MAX_LEN.assigned_technician }, errors);
+  const technician = typeof body.assigned_technician === 'string' ? body.assigned_technician.trim() : '';
+  if (technician && !TECHNICIANS.includes(technician)) errors.push('El técnico asignado no es válido.');
+  const promisedAt = body.promised_at;
+  if (promisedAt !== undefined && promisedAt !== null && promisedAt !== '') {
+    if (typeof promisedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(promisedAt) ||
+        Number.isNaN(Date.parse(`${promisedAt}T00:00:00Z`)) || new Date(`${promisedAt}T00:00:00Z`).toISOString().slice(0, 10) !== promisedAt) {
+      errors.push('La fecha prometida no es válida.');
+    }
+  }
   const problems = checkStringList(body, 'problems', 'Los problemas', errors);
   checkStringList(body, 'arrival_condition', 'Cómo llegó', errors);
   if (problems && problems.length === 0) errors.push('Elige al menos un problema.');
@@ -398,6 +487,76 @@ function validateOrder(body) {
     errors.push('Si es diagnóstico, escribe qué dice el cliente.');
   }
   return errors;
+}
+
+function readOrderFilters(query) {
+  const filters = {
+    from: localDateOnly(query.from) ? query.from : '',
+    to: localDateOnly(query.to) ? query.to : '',
+    status: typeof query.status === 'string' && STATUSES.includes(query.status) ? query.status : '',
+    technician: typeof query.technician === 'string' && TECHNICIANS.includes(query.technician) ? query.technician : '',
+    deviceType: typeof query.device_type === 'string' ? query.device_type.trim().slice(0, 30) : '',
+    problem: typeof query.problem === 'string' ? query.problem.trim().slice(0, 40) : '',
+    completedTechnician: typeof query.completed_technician === 'string' && TECHNICIANS.includes(query.completed_technician) ? query.completed_technician : '',
+    completedFrom: localDateOnly(query.completed_from) ? query.completed_from : '',
+    completedTo: localDateOnly(query.completed_to) ? query.completed_to : '',
+    agingBucket: ['0_1', '2_3', '4_7', '8_plus'].includes(query.aging_bucket) ? query.aging_bucket : '',
+    pickupBucket: ['under_24', '1_2', '2_3', '3_plus'].includes(query.pickup_bucket) ? query.pickup_bucket : '',
+    openOnly: query.open_only === '1',
+    overdueOnly: query.overdue === '1',
+    unassignedOnly: query.unassigned === '1',
+    completedUnassigned: query.completed_unassigned === '1',
+  };
+  return filters;
+}
+
+function buildOrderWhere(filters) {
+  const clauses = [];
+  const params = [];
+  if (filters.from) { clauses.push('date(created_at) >= date(?)'); params.push(filters.from); }
+  if (filters.to) { clauses.push('date(created_at) <= date(?)'); params.push(filters.to); }
+  if (filters.status) { clauses.push('status = ?'); params.push(filters.status); }
+  if (filters.technician) { clauses.push('assigned_technician = ?'); params.push(filters.technician); }
+  if (filters.deviceType) { clauses.push('device_type = ?'); params.push(filters.deviceType); }
+  if (filters.problem) { clauses.push("EXISTS (SELECT 1 FROM json_each(orders.problems) WHERE value = ?)"); params.push(filters.problem); }
+  if (filters.openOnly) clauses.push("orders.status <> 'Entregado'");
+  if (filters.unassignedOnly) clauses.push('orders.assigned_technician IS NULL');
+  if (filters.overdueOnly) clauses.push("orders.status <> 'Entregado' AND orders.promised_at < date('now', 'localtime')");
+  if (filters.agingBucket) {
+    const bounds = { '0_1': [-2, null], '2_3': [-4, -2], '4_7': [-8, -4], '8_plus': [null, -8] }[filters.agingBucket];
+    clauses.push("orders.status <> 'Entregado'");
+    if (bounds[0] !== null && bounds[1] !== null) {
+      clauses.push("orders.created_at < datetime('now', 'localtime', ?) AND orders.created_at >= datetime('now', 'localtime', ?)");
+      params.push(`${bounds[0]} days`, `${bounds[1]} days`);
+    } else if (bounds[0] !== null) {
+      clauses.push("orders.created_at >= datetime('now', 'localtime', ?)"); params.push(`${bounds[0]} days`);
+    } else {
+      clauses.push("orders.created_at < datetime('now', 'localtime', ?)"); params.push(`${bounds[1]} days`);
+    }
+  }
+  if (filters.pickupBucket) {
+    const bounds = { under_24: [null, -24], '1_2': [-24, -48], '2_3': [-48, -72], '3_plus': [-72, null] }[filters.pickupBucket];
+    clauses.push("orders.status = 'Listo'");
+    const readyTime = "(SELECT MAX(e.created_at) FROM order_events e WHERE e.order_id = orders.id AND e.event_type = 'status' AND e.to_status = 'Listo')";
+    if (bounds[0] === null) clauses.push(`${readyTime} >= datetime('now', 'localtime', ?)`), params.push(`${bounds[1]} hours`);
+    else if (bounds[1] === null) clauses.push(`${readyTime} < datetime('now', 'localtime', ?)`), params.push(`${bounds[0]} hours`);
+    else {
+      clauses.push(`${readyTime} < datetime('now', 'localtime', ?) AND ${readyTime} >= datetime('now', 'localtime', ?)`);
+      params.push(`${bounds[0]} hours`, `${bounds[1]} hours`);
+    }
+  }
+  if (filters.completedTechnician || filters.completedFrom || filters.completedTo || filters.completedUnassigned) {
+    clauses.push(`EXISTS (SELECT 1 FROM order_events e WHERE e.order_id = orders.id
+      AND e.event_type = 'status' AND e.to_status = 'Entregado'
+      AND (? = '' OR e.assigned_technician = ?)
+      AND (? = 0 OR e.assigned_technician IS NULL)
+      AND (? = '' OR date(e.created_at) >= date(?))
+      AND (? = '' OR date(e.created_at) <= date(?)))`);
+    params.push(filters.completedTechnician, filters.completedTechnician,
+      filters.completedUnassigned ? 1 : 0,
+      filters.completedFrom, filters.completedFrom, filters.completedTo, filters.completedTo);
+  }
+  return { sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '', params };
 }
 
 // B-9: escapa los comodines de LIKE (\, %, _) para que se busquen como
@@ -408,31 +567,199 @@ function escapeLike(s) {
 
 // List orders (search + status filter)
 app.get('/api/orders', (req, res) => {
-  const { search = '', status = '' } = req.query;
-  let sql = 'SELECT * FROM orders';
-  const clauses = [];
-  const params = [];
-  if (status && STATUSES.includes(status)) {
-    clauses.push('status = ?');
-    params.push(status);
-  }
+  const search = typeof req.query.search === 'string' ? req.query.search : '';
+  const status = typeof req.query.status === 'string' ? req.query.status : '';
+  const filters = readOrderFilters({ ...req.query, status: status || '' });
+  const where = buildOrderWhere(filters);
+  let sql = `SELECT orders.*,
+    (SELECT e.created_at FROM order_events e WHERE e.order_id = orders.id
+      AND e.event_type = 'status' AND e.to_status = orders.status
+      ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at
+    FROM orders` + where.sql;
+  const params = [...where.params];
   if (search.trim()) {
     const likeCols = ['customer_name', 'ticket', 'model', 'phone']
       .map(c => `${c} LIKE ? ESCAPE '\\'`).join(' OR ');
-    clauses.push(`(${likeCols})`);
+    sql += (where.sql ? ' AND ' : ' WHERE ') + `(${likeCols})`;
     const like = `%${escapeLike(search.trim())}%`;
     params.push(like, like, like, like);
   }
-  if (clauses.length) sql += ' WHERE ' + clauses.join(' AND ');
   sql += ' ORDER BY id DESC';
   const rows = db.prepare(sql).all(...params).map(toPublic);
   res.json(rows);
 });
 
+function localDateOnly(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function dateBucket(dateValue, interval) {
+  const date = new Date(`${dateValue.slice(0, 10)}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  if (interval === 'month') {
+    const start = new Date(date.getFullYear(), date.getMonth(), 1);
+    return { key: fmt(start), label: start.toLocaleDateString('es-US', { month: 'short', year: '2-digit' }),
+      from: fmt(start), to: fmt(new Date(date.getFullYear(), date.getMonth() + 1, 0)), value: 0 };
+  }
+  if (interval === 'week') {
+    const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    const end = new Date(start); end.setDate(end.getDate() + 6);
+    return { key: fmt(start), label: `${start.toLocaleDateString('es-US', { month: 'short', day: 'numeric' })}–${end.toLocaleDateString('es-US', { month: 'short', day: 'numeric' })}`,
+      from: fmt(start), to: fmt(end), value: 0 };
+  }
+  return { key: fmt(date), label: date.toLocaleDateString('es-US', { month: 'short', day: 'numeric' }),
+    from: fmt(date), to: fmt(date), value: 0 };
+}
+
+// Métricas operativas autenticadas. Las fechas históricas solo se calculan a
+// partir de created_at y de transiciones guardadas en auditoría.
+app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
+  const filters = readOrderFilters(req.query);
+  if (filters.from && !localDateOnly(filters.from)) filters.from = '';
+  if (filters.to && !localDateOnly(filters.to)) filters.to = '';
+  if (filters.from && filters.to && filters.from > filters.to) {
+    return res.status(400).json({ error: 'El inicio del período debe ser anterior al final.' });
+  }
+  const interval = ['day', 'week', 'month'].includes(req.query.interval) ? req.query.interval : 'day';
+  const categoryWhere = buildOrderWhere({ ...filters, from: '', to: '' });
+  const rangeWhere = buildOrderWhere(filters);
+  const categoryOrders = db.prepare('SELECT * FROM orders' + categoryWhere.sql).all(...categoryWhere.params);
+  const rangeOrders = db.prepare('SELECT * FROM orders' + rangeWhere.sql).all(...rangeWhere.params);
+  const today = db.prepare("SELECT date('now', 'localtime') AS today").get().today;
+  const now = Date.now();
+  const dateMs = value => Date.parse(String(value || '').replace(' ', 'T'));
+  const ageDays = order => Math.max(0, (now - dateMs(order.created_at)) / 86400000);
+  const openOrders = categoryOrders.filter(o => o.status !== 'Entregado');
+  const readyOrders = categoryOrders.filter(o => o.status === 'Listo');
+  const latestReady = new Map();
+  for (const event of db.prepare(`
+    SELECT e.order_id, e.created_at FROM order_events e
+    WHERE e.event_type = 'status' AND e.to_status = 'Listo'
+    ORDER BY e.created_at DESC, e.id DESC
+  `).all()) {
+    if (!latestReady.has(event.order_id)) latestReady.set(event.order_id, event.created_at);
+  }
+  const pickupHours = order => latestReady.has(order.id)
+    ? Math.max(0, (now - dateMs(latestReady.get(order.id))) / 3600000) : null;
+
+  const deliveredSql = `
+    SELECT COUNT(*) AS n FROM order_events e JOIN orders o ON o.id = e.order_id
+    WHERE e.event_type = 'status' AND e.to_status = 'Entregado'
+      AND date(e.created_at) = date('now', 'localtime')
+      AND (? = '' OR e.assigned_technician = ?)
+      AND (? = '' OR o.device_type = ?)
+      AND (? = '' OR o.status = ?)
+      AND (? = '' OR EXISTS (SELECT 1 FROM json_each(o.problems) WHERE value = ?))
+  `;
+  const deliveredToday = db.prepare(deliveredSql).get(
+    filters.technician, filters.technician, filters.deviceType, filters.deviceType,
+    filters.status, filters.status, filters.problem, filters.problem
+  ).n;
+
+  const byCreated = new Map();
+  for (const order of rangeOrders) {
+    const bucket = dateBucket(order.created_at, interval);
+    if (bucket) {
+      const found = byCreated.get(bucket.key) || bucket;
+      found.value++;
+      byCreated.set(bucket.key, found);
+    }
+  }
+  const completedQuery = db.prepare(`
+    SELECT e.*, o.created_at AS order_created_at, o.device_type, o.problems
+    FROM order_events e JOIN orders o ON o.id = e.order_id
+    WHERE e.event_type = 'status' AND e.to_status = 'Entregado'
+      AND (? = '' OR date(e.created_at) >= date(?))
+      AND (? = '' OR date(e.created_at) <= date(?))
+      AND (? = '' OR o.device_type = ?)
+  `);
+  const completed = completedQuery.all(filters.from, filters.from, filters.to, filters.to,
+    filters.deviceType, filters.deviceType).filter(e => {
+      if (filters.status && filters.status !== 'Entregado') return false;
+      if (filters.technician && e.assigned_technician !== filters.technician) return false;
+      if (filters.problem && !JSON.parse(e.problems || '[]').includes(filters.problem)) return false;
+      return true;
+    });
+  const turnaround = completed.map(e => ({
+    technician: e.assigned_technician,
+    hours: Math.max(0, (dateMs(e.created_at) - dateMs(e.order_created_at)) / 3600000),
+  }));
+  const median = values => {
+    if (!values.length) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted.length % 2 ? sorted[(sorted.length - 1) / 2] :
+      (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+  };
+  const countBy = (rows, valueOf) => {
+    const counts = new Map();
+    for (const row of rows) {
+      const label = valueOf(row);
+      if (label) counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    return [...counts].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+  };
+  const statuses = STATUSES.map(label => ({ label, value: rangeOrders.filter(o => o.status === label).length }));
+  const technicians = TECHNICIANS.map(label => ({
+    label, value: openOrders.filter(o => o.assigned_technician === label).length,
+    completed: completed.filter(e => e.assigned_technician === label).length,
+  }));
+  technicians.push({ label: 'Sin asignar', value: openOrders.filter(o => !o.assigned_technician).length,
+    completed: completed.filter(e => !e.assigned_technician).length });
+  const aging = [
+    { label: '0–1 días', min: 0, max: 2 }, { label: '2–3 días', min: 2, max: 4 },
+    { label: '4–7 días', min: 4, max: 8 }, { label: '8+ días', min: 8, max: Infinity },
+  ].map(b => ({ label: b.label, value: openOrders.filter(o => ageDays(o) >= b.min && ageDays(o) < b.max).length }));
+  const pickupWaiting = [
+    { label: '<24 h', min: 0, max: 24 }, { label: '1–2 días', min: 24, max: 48 },
+    { label: '2–3 días', min: 48, max: 72 }, { label: '3+ días', min: 72, max: Infinity },
+  ].map(b => ({ label: b.label, value: readyOrders.filter(o => {
+    const hours = pickupHours(o); return hours !== null && hours >= b.min && hours < b.max;
+  }).length }));
+  const turnaroundByTechnician = TECHNICIANS.map(label => {
+    const values = turnaround.filter(t => t.technician === label).map(t => t.hours);
+    const value = median(values);
+    return { label, value: value === null ? 0 : Math.round(value * 10) / 10, count: values.length };
+  });
+
+  res.json({
+    generatedAt: new Date().toISOString(), interval, filters,
+    summary: {
+      createdToday: categoryOrders.filter(o => o.created_at.slice(0, 10) === today).length,
+      open: openOrders.length,
+      inRepair: categoryOrders.filter(o => o.status === 'En reparación').length,
+      ready: readyOrders.length,
+      deliveredToday,
+      aging: openOrders.filter(o => ageDays(o) >= 3).length,
+      overdue: openOrders.filter(o => o.promised_at && o.promised_at < today).length,
+      waitingPickup: readyOrders.filter(o => (pickupHours(o) || 0) >= 48).length,
+    },
+    created: [...byCreated.values()].sort((a, b) => a.key.localeCompare(b.key)),
+    statuses,
+    technicians,
+    devices: countBy(rangeOrders, o => o.device_type),
+    issues: countBy(rangeOrders.flatMap(o => JSON.parse(o.problems || '[]')), p => p).slice(0, 10),
+    aging,
+    pickupWaiting,
+    turnaround: { medianHours: median(turnaround.map(t => t.hours)), completedCount: turnaround.length, byTechnician: turnaroundByTechnician },
+    techniciansRoster: TECHNICIANS,
+    deviceTypes: db.prepare('SELECT DISTINCT device_type FROM orders ORDER BY device_type').all().map(r => r.device_type),
+  });
+});
+
 // Una sola orden por id (para edición). Protegido con requireAuth como el
 // resto de /api/orders/* (B-2: openEdit ya no descarga todas las órdenes).
 app.get('/api/orders/:id', (req, res) => {
-  const row = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  const row = db.prepare(`
+    SELECT o.*,
+      (SELECT e.created_at FROM order_events e WHERE e.order_id = o.id
+        AND e.event_type = 'status' AND e.to_status = o.status
+        ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at
+    FROM orders o WHERE o.id = ?
+  `).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Orden no encontrada.' });
   res.json(toPublic(row));
 });
@@ -448,9 +775,16 @@ app.post('/api/orders', (req, res) => {
   // por colisión de customer_code reutilizan el mismo ticket (no queman
   // números extra). Si la creación falla del todo tras los reintentos, ese
   // único ticket se pierde — igual que con cualquier inserción fallida antes.
-  const ticket = nextTicket();
-  const info = insertOrderWithCodeRetry(ticket, b);
-  const row = db.prepare('SELECT * FROM orders WHERE id = ?').get(info.lastInsertRowid);
+  const row = withTransaction(() => {
+    const ticket = nextTicket();
+    const info = insertOrderWithCodeRetry(ticket, b);
+    const created = db.prepare('SELECT * FROM orders WHERE id = ?').get(info.lastInsertRowid);
+    recordOrderEvent(created.id, created.ticket, 'status', null, 'Recibido', req.staffUser.username, created.assigned_technician);
+    if (created.assigned_technician) {
+      recordOrderEvent(created.id, created.ticket, 'technician_assigned', null, null, req.staffUser.username, created.assigned_technician);
+    }
+    return created;
+  });
   res.status(201).json(toPublic(row));
 });
 
@@ -464,8 +798,8 @@ function insertOrderWithCodeRetry(ticket, b) {
     try {
       return db.prepare(`
         INSERT INTO orders
-          (ticket, customer_code, customer_name, phone, device_type, model, imei, problems, arrival_condition, received_by, agreement, diagnostic_note, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibido')
+          (ticket, customer_code, customer_name, phone, device_type, model, imei, problems, arrival_condition, received_by, agreement, diagnostic_note, assigned_technician, promised_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibido')
       `).run(
         ticket,
         customerCode,
@@ -478,7 +812,9 @@ function insertOrderWithCodeRetry(ticket, b) {
         JSON.stringify(b.arrival_condition || []),
         b.received_by.trim(),
         b.agreement.trim(),
-        (b.diagnostic_note || '').trim()
+        (b.diagnostic_note || '').trim(),
+        (b.assigned_technician || '').trim() || null,
+        (b.promised_at || '').trim() || null
       );
     } catch (e) {
       const isCodeCollision = e && e.code === 'ERR_SQLITE_ERROR' &&
@@ -533,10 +869,13 @@ app.post('/api/orders/:id/advance', (req, res) => {
     return res.status(400).json({ error: 'La orden ya está entregada.' });
   }
   const toStatus = STATUSES[idx + 1];
-  db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now', 'localtime') WHERE id = ?")
-    .run(toStatus, req.params.id);
-  logStatusChange(row.id, row.ticket, row.status, toStatus, req.staffUser.username);
-  res.json(toPublic(db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id)));
+  const updated = withTransaction(() => {
+    db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now', 'localtime') WHERE id = ?")
+      .run(toStatus, req.params.id);
+    logStatusChange(row.id, row.ticket, row.status, toStatus, req.staffUser.username, row.assigned_technician);
+    return db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  });
+  res.json(toPublic(updated));
 });
 
 // Historial de cambios de estado de una orden (auditoría).
@@ -550,6 +889,17 @@ app.get('/api/orders/:id/audit', (req, res) => {
   res.json(rows);
 });
 
+app.get('/api/orders/:id/history', (req, res) => {
+  const order = db.prepare('SELECT id FROM orders WHERE id = ?').get(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Orden no encontrada.' });
+  const events = db.prepare(`
+    SELECT id, order_id, ticket, event_type, from_status, to_status,
+      previous_technician, assigned_technician, actor, created_at
+    FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC
+  `).all(req.params.id);
+  res.json(events);
+});
+
 // Full edit
 // Delete an order — only while still in 'Recibido' (safe way to clear bogus
 // test orders). Any later status is protected: 409.
@@ -559,8 +909,10 @@ app.delete('/api/orders/:id', (req, res) => {
   if (row.status !== 'Recibido') {
     return res.status(409).json({ error: 'Solo se pueden eliminar órdenes en estado Recibido.' });
   }
-  logStatusChange(row.id, row.ticket, row.status, 'Eliminada', req.staffUser.username);
-  db.prepare('DELETE FROM orders WHERE id = ?').run(req.params.id);
+  withTransaction(() => {
+    logStatusChange(row.id, row.ticket, row.status, 'Eliminada', req.staffUser.username, row.assigned_technician);
+    db.prepare('DELETE FROM orders WHERE id = ?').run(req.params.id);
+  });
   res.json({ ok: true, ticket: row.ticket });
 });
 
@@ -573,6 +925,10 @@ app.put('/api/orders/:id', (req, res) => {
   const errors = validateOrder(req.body);
   if (errors.length) return res.status(400).json({ errors });
   const b = req.body;
+  const assignedTechnician = Object.prototype.hasOwnProperty.call(b, 'assigned_technician')
+    ? ((b.assigned_technician || '').trim() || null) : existing.assigned_technician;
+  const promisedAt = Object.prototype.hasOwnProperty.call(b, 'promised_at')
+    ? ((b.promised_at || '').trim() || null) : existing.promised_at;
   const status = STATUSES.includes(b.status) ? b.status : existing.status;
   // B-3: la máquina de estados se impone en el servidor. Solo se permite
   // quedarse en el mismo estado o avanzar; las regresiones (p. ej.
@@ -582,30 +938,39 @@ app.put('/api/orders/:id', (req, res) => {
   if (fromIdx >= 0 && toIdx >= 0 && toIdx < fromIdx) {
     return res.status(400).json({ error: 'No se puede devolver una orden a un estado anterior.' });
   }
-  db.prepare(`
-    UPDATE orders SET
-      customer_name = ?, phone = ?, device_type = ?, model = ?, imei = ?,
-      problems = ?, arrival_condition = ?, received_by = ?, agreement = ?,
-      diagnostic_note = ?, status = ?, updated_at = datetime('now', 'localtime')
-    WHERE id = ?
-  `).run(
-    b.customer_name.trim(),
-    (b.phone || '').trim(),
-    b.device_type.trim(),
-    b.model.trim(),
-    (b.imei || '').trim(),
-    JSON.stringify(b.problems || []),
-    JSON.stringify(b.arrival_condition || []),
-    b.received_by.trim(),
-    b.agreement.trim(),
-    (b.diagnostic_note || '').trim(),
-    status,
-    req.params.id
-  );
-  if (status !== existing.status) {
-    logStatusChange(existing.id, existing.ticket, existing.status, status, req.staffUser.username);
-  }
-  res.json(toPublic(db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id)));
+  const updated = withTransaction(() => {
+    db.prepare(`
+      UPDATE orders SET
+        customer_name = ?, phone = ?, device_type = ?, model = ?, imei = ?,
+        problems = ?, arrival_condition = ?, received_by = ?, agreement = ?,
+        diagnostic_note = ?, assigned_technician = ?, promised_at = ?, status = ?, updated_at = datetime('now', 'localtime')
+      WHERE id = ?
+    `).run(
+      b.customer_name.trim(),
+      (b.phone || '').trim(),
+      b.device_type.trim(),
+      b.model.trim(),
+      (b.imei || '').trim(),
+      JSON.stringify(b.problems || []),
+      JSON.stringify(b.arrival_condition || []),
+      b.received_by.trim(),
+      b.agreement.trim(),
+      (b.diagnostic_note || '').trim(),
+      assignedTechnician,
+      promisedAt,
+      status,
+      req.params.id
+    );
+    if (status !== existing.status) {
+      logStatusChange(existing.id, existing.ticket, existing.status, status, req.staffUser.username, assignedTechnician);
+    }
+    if (assignedTechnician !== existing.assigned_technician) {
+      recordOrderEvent(existing.id, existing.ticket, 'technician_assigned', existing.status, status,
+        req.staffUser.username, assignedTechnician, existing.assigned_technician);
+    }
+    return db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  });
+  res.json(toPublic(updated));
 });
 
 // Manejador global de errores: registra el error completo en el servidor pero

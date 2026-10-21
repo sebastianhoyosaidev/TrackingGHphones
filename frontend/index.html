@@ -21,7 +21,8 @@
 </header>
 
 <nav class="tabs hidden" id="main-tabs">
-  <button class="tab active" data-view="intake">Nueva orden</button>
+  <button class="tab active" data-view="dashboard">Panel</button>
+  <button class="tab" data-view="intake">Nueva orden</button>
   <button class="tab" data-view="orders">Órdenes</button>
   <button class="tab" data-view="lookup">Consultar ticket</button>
   <span class="user-chip"><span id="user-name"></span> · <button type="button" id="btn-logout" class="btn-link">Cerrar sesión</button></span>
@@ -50,6 +51,39 @@
         </form>
         <p class="remember-note">Se recuerda tu usuario en este equipo.</p>
       </div>
+    </div>
+  </section>
+
+  <!-- ============ DASHBOARD ============ -->
+  <section id="view-dashboard" class="view dashboard-view">
+    <div class="dashboard-heading">
+      <div><p class="eyebrow">GEEKS HOLLYWOOD · OPERACIONES</p><h2>Panel del taller</h2>
+        <p class="muted">Seguimiento de órdenes, carga de trabajo y entregas.</p></div>
+      <button type="button" class="btn-secondary" id="dashboard-export">Descargar reporte CSV</button>
+    </div>
+    <form id="dashboard-filters" class="dashboard-filters" aria-label="Filtros del panel">
+      <label>Desde<input type="date" id="dash-from"></label>
+      <label>Hasta<input type="date" id="dash-to"></label>
+      <label>Estado<select id="dash-status"><option value="">Todos los estados</option><option>Recibido</option><option>En reparación</option><option>Listo</option><option>Entregado</option></select></label>
+      <label>Técnico<select id="dash-technician"><option value="">Todos los técnicos</option></select></label>
+      <label>Equipo<select id="dash-device"><option value="">Todos los equipos</option></select></label>
+      <label>Agrupar por<select id="dash-interval"><option value="day">Día</option><option value="week">Semana</option><option value="month">Mes</option></select></label>
+      <button type="submit" class="btn-primary">Aplicar filtros</button>
+    </form>
+    <p id="dashboard-state" class="dashboard-state" role="status" aria-live="polite">Cargando datos…</p>
+    <div id="dashboard-content" class="hidden">
+      <div class="kpi-grid" id="dashboard-kpis" aria-label="Indicadores del taller"></div>
+      <div class="dashboard-grid">
+        <section class="chart-panel chart-panel-wide"><h3>Órdenes creadas por período</h3><div id="chart-created" class="bar-chart"></div></section>
+        <section class="chart-panel"><h3>Órdenes por estado</h3><div id="chart-status" class="bar-chart"></div></section>
+        <section class="chart-panel"><h3>Carga y entregas por técnico</h3><div id="chart-technicians" class="bar-chart"></div></section>
+        <section class="chart-panel"><h3>Equipos</h3><div id="chart-devices" class="bar-chart"></div></section>
+        <section class="chart-panel"><h3>Problemas más frecuentes</h3><div id="chart-issues" class="bar-chart"></div></section>
+        <section class="chart-panel"><h3>Antigüedad de órdenes abiertas</h3><p class="chart-note">Envejecida: abierta durante 3 días o más.</p><div id="chart-aging" class="bar-chart"></div></section>
+        <section class="chart-panel"><h3>Tiempo esperando recogida</h3><p class="chart-note">Una orden se considera atrasada para recogida después de 48 horas en Listo.</p><div id="chart-pickup" class="bar-chart"></div></section>
+        <section class="chart-panel"><h3>Tiempo de reparación</h3><p id="turnaround-summary" class="chart-note"></p><div id="chart-turnaround" class="bar-chart"></div></section>
+      </div>
+      <p class="dashboard-footnote">El tiempo de reparación se mide desde la recepción hasta Entregado usando el historial guardado. Las órdenes antiguas sin asignación histórica no se atribuyen a un técnico.</p>
     </div>
   </section>
 
@@ -106,6 +140,14 @@
         <input type="text" id="f-received-by" required placeholder="Nombre del técnico">
       </label>
 
+      <label>Técnico responsable (opcional)
+        <select id="f-technician"><option value="">Sin asignar</option></select>
+      </label>
+
+      <label>Fecha prometida (opcional)
+        <input type="date" id="f-promised-at">
+      </label>
+
       <label>¿Qué se acordó con el cliente? *
         <textarea id="f-agreement" rows="2" required placeholder="Ej: Se entrega en 2 días, costo $80"></textarea>
       </label>
@@ -129,6 +171,13 @@
   <section id="view-orders" class="view">
     <div class="orders-toolbar">
       <input type="search" id="orders-search" placeholder="Buscar por nombre, ticket, modelo o teléfono...">
+      <div class="orders-extra-filters">
+        <label>Desde<input type="date" id="orders-from"></label>
+        <label>Hasta<input type="date" id="orders-to"></label>
+        <label>Técnico<select id="orders-technician"><option value="">Todos los técnicos</option></select></label>
+        <label>Equipo<select id="orders-device"><option value="">Todos los equipos</option></select></label>
+        <label>Problema<input type="text" id="orders-problem" placeholder="Todos los problemas"></label>
+      </div>
       <div class="chips" id="status-filter">
         <button type="button" class="chip active" data-value="">Todos</button>
         <button type="button" class="chip" data-value="Recibido">Recibido</button>
@@ -136,6 +185,7 @@
         <button type="button" class="chip" data-value="Listo">Listo</button>
         <button type="button" class="chip" data-value="Entregado">Entregado</button>
       </div>
+      <button type="button" id="orders-clear-filters" class="btn-secondary">Limpiar filtros</button>
     </div>
     <div id="orders-list"></div>
   </section>
@@ -193,6 +243,12 @@
       </div>
       <label>¿Quién lo recibe? *
         <input type="text" id="e-received-by" required>
+      </label>
+      <label>Técnico responsable
+        <select id="e-technician"><option value="">Sin asignar</option></select>
+      </label>
+      <label>Fecha prometida
+        <input type="date" id="e-promised-at">
       </label>
       <label>¿Qué se acordó? *
         <textarea id="e-agreement" rows="2" required></textarea>
