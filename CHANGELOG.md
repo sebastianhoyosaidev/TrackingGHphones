@@ -51,6 +51,35 @@ la app de verdad corre en el servidor (Oracle Cloud).
 - Marketing: lista nueva "Listos y sin recoger (3+ días)" como **aviso de
   servicio** (se puede avisar a cualquier cliente con teléfono).
 
+**Vista rápida en todo el panel**
+- Un clic en cualquier tarjeta (dinero por entrar, comparaciones, indicadores)
+  o barra de gráfico despliega sus 6 órdenes más recientes; cada una abre la
+  orden y "Ver todas" abre la lista filtrada. Una sola lista abierta a la vez
+  (segundo clic o Esc la cierra). Filas de Clientes también.
+- Cada lista pide solo 6 órdenes y se guarda en memoria hasta que cambian los
+  filtros. Verificado: las 56 listas cuadran con el número de su tarjeta.
+- Se quitó "Órdenes creadas por período" y el filtro "Agrupar por".
+
+**Siempre en línea y sin perder datos**
+- Respaldo automático verificado tras cada cambio (1 min sin cambios, máx.
+  10 min), al arrancar (antes de migrar) y al apagar. Se guardan 48 recientes
+  + 1 por día durante 30 días. El panel muestra "Último respaldo automático".
+- Ediciones simultáneas: si otra persona cambió la orden mientras la
+  editabas, no se sobrescribe (aviso). "Avanzar estado" desde una lista vieja
+  ya no avanza dos veces.
+- La lista de Órdenes y el panel se actualizan solos cada 30 s y al volver a
+  la app, sin interrumpir formularios ni listas abiertas.
+
+**Correcciones de exactitud**
+- Historial duplicado (venía de v1.3.0): cada reinicio volvía a copiar los
+  cambios de estado, inflando "Entregadas hoy", entregas por técnico y tiempos.
+  Se corrige la causa y se limpian automáticamente los duplicados existentes.
+- Tiempo de reparación: ahora mide recibido → listo (antes hasta entregado,
+  sumando la espera de recogida; en la simulación salía el doble). La espera
+  de recogida se muestra aparte.
+- "Entregadas por técnico" mostraba la cifra de pendientes.
+- Antigüedad "2–3 días" y "4–7 días" siempre salían vacías al pulsarlas.
+
 **Taller simulado (para pruebas)**
 - `node seed-demo.js` crea `demo.db` con 6 meses de órdenes falsas realistas
   (clientes que repiten, garantías, equipos sin recoger, precios). Nunca toca

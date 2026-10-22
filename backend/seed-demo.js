@@ -279,8 +279,8 @@ const insertOrder = db.prepare(`
     assigned_technician, promised_at, price, marketing_opt_in, warranty_of, warranty_result, warranty_reason)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 const insertEvent = db.prepare(`
-  INSERT INTO order_events (order_id, ticket, event_type, from_status, to_status, assigned_technician, actor, details, created_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  INSERT INTO order_events (order_id, ticket, event_type, from_status, to_status, assigned_technician, actor, details, created_at, source_audit_id)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 const insertAudit = db.prepare(`
   INSERT INTO audit_log (order_id, ticket, from_status, to_status, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
 const bumpTicket = db.prepare("UPDATE counters SET value = value + 1 WHERE name = 'ticket' RETURNING value");
@@ -300,17 +300,17 @@ try {
       o.original ? o.original.dbId : null, o.warranty?.result || null, o.warranty?.reason || null);
     o.dbId = Number(info.lastInsertRowid);
     o.ticket = ticket;
-    insertEvent.run(o.dbId, ticket, 'status', null, 'Recibido', o.technician, STAFF, null, fmt(o.created));
-    if (o.technician) insertEvent.run(o.dbId, ticket, 'technician_assigned', null, null, o.technician, STAFF, null, fmt(o.created));
+    insertEvent.run(o.dbId, ticket, 'status', null, 'Recibido', o.technician, STAFF, null, fmt(o.created), null);
+    if (o.technician) insertEvent.run(o.dbId, ticket, 'technician_assigned', null, null, o.technician, STAFF, null, fmt(o.created), null);
     if (o.original) {
       insertEvent.run(o.dbId, ticket, 'warranty_opened', null, null, null, STAFF,
-        `Garantía de ${o.original.ticket}: ${o.warranty.result} — ${o.warranty.reason}`, fmt(o.created));
+        `Garantía de ${o.original.ticket}: ${o.warranty.result} — ${o.warranty.reason}`, fmt(o.created), null);
       insertEvent.run(o.original.dbId, o.original.ticket, 'warranty_claim', null, null, null, STAFF,
-        `Volvió por garantía: ${ticket} (${o.warranty.result})`, fmt(o.created));
+        `Volvió por garantía: ${ticket} (${o.warranty.result})`, fmt(o.created), null);
     }
     for (const e of o.events.slice(1)) {
-      insertAudit.run(o.dbId, ticket, e.from, e.to, STAFF, fmt(e.at));
-      insertEvent.run(o.dbId, ticket, 'status', e.from, e.to, o.technician, STAFF, null, fmt(e.at));
+      const audit = insertAudit.run(o.dbId, ticket, e.from, e.to, STAFF, fmt(e.at));
+      insertEvent.run(o.dbId, ticket, 'status', e.from, e.to, o.technician, STAFF, null, fmt(e.at), Number(audit.lastInsertRowid));
     }
   }
   db.exec('COMMIT');

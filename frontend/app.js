@@ -303,7 +303,7 @@ document.getElementById('orders-clear-filters').addEventListener('click', () => 
   ['orders-from', 'orders-to', 'orders-technician', 'orders-device', 'orders-problem'].forEach(id => {
     document.getElementById(id).value = '';
   });
-  ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned']
+  ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned', 'warranty_only']
     .forEach(key => delete document.getElementById('orders-list').dataset[key]);
   currentStatusFilter = '';
   document.querySelectorAll('#status-filter .chip').forEach(b => b.classList.toggle('active', b.dataset.value === ''));
@@ -322,10 +322,12 @@ document.querySelectorAll('#status-filter .chip').forEach(b => {
 const ORDERS_PAGE = 50;
 let ordersShown = ORDERS_PAGE;
 let ordersSearchTimer = null;
+let ordersSeq = 0; // si llegan respuestas viejas (escribir rápido, cambiar filtros), se ignoran
 
 async function loadOrders(opts) {
   // Un filtro nuevo vuelve a la primera página; "Mostrar más" la conserva.
   if (!(opts && opts.keepPage === true)) ordersShown = ORDERS_PAGE;
+  const seq = ++ordersSeq;
   const list = document.getElementById('orders-list');
   const q = new URLSearchParams({
     search: document.getElementById('orders-search').value,
@@ -337,14 +339,16 @@ async function loadOrders(opts) {
     problem: document.getElementById('orders-problem').value.trim(),
     limit: String(ordersShown)
   });
-  ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned']
+  ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned', 'warranty_only']
     .forEach(key => { if (list.dataset[key]) q.set(key, list.dataset[key]); });
   if (!list.children.length || !(opts && opts.keepPage)) list.innerHTML = '<p class="empty">Cargando órdenes…</p>';
   try {
     const response = await api('/api/orders?' + q);
+    if (seq !== ordersSeq) return;
     if (response.status === 401) return sessionExpired();
     if (!response.ok) throw new Error('No se pudieron cargar las órdenes.');
     const orders = await response.json();
+    if (seq !== ordersSeq) return;
     const total = Number(response.headers.get('X-Total-Count')) || orders.length;
     if (!orders.length) {
       list.innerHTML = '<p class="empty">No hay órdenes aquí todavía.</p>';
@@ -443,7 +447,10 @@ async function advanceOrder(id, currentStatus) {
   if (currentStatus === 'Listo' &&
       !confirm('¿Marcar como ENTREGADO? Esto no se puede deshacer.\nDesde hoy empiezan a contar los días de garantía.')) return;
   try {
-    const r = await api('/api/orders/' + id + '/advance', { method: 'POST' });
+    const r = await api('/api/orders/' + id + '/advance', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: currentStatus })
+    });
     if (r.status === 401) return sessionExpired();
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
@@ -493,6 +500,7 @@ function statusCssClass(status) {
 
 // ---------- Edit ----------
 let editingId = null;
+let editingUpdatedAt = null; // para detectar si otra persona la cambió mientras se edita
 async function openEdit(id) {
   // B-2: trae solo la orden a editar, no toda la lista.
   const r = await api('/api/orders/' + encodeURIComponent(id));
@@ -501,6 +509,7 @@ async function openEdit(id) {
   const o = await r.json();
   if (!o || !o.id) return;
   editingId = o.id;
+  editingUpdatedAt = o.updated_at;
   document.getElementById('edit-ticket').textContent = o.ticket;
   document.getElementById('e-name').value = o.customer_name;
   document.getElementById('e-phone').value = o.phone || '';
@@ -548,7 +557,8 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
     marketing_opt_in: document.getElementById('e-optin').checked,
     agreement: document.getElementById('e-agreement').value,
     diagnostic_note: document.getElementById('e-diagnostic').value,
-    status: document.getElementById('e-status').value
+    status: document.getElementById('e-status').value,
+    expected_updated_at: editingUpdatedAt
   };
   try {
     const r = await api('/api/orders/' + editingId, {
@@ -624,7 +634,7 @@ document.getElementById('dashboard-filters').addEventListener('submit', e => {
   e.preventDefault();
   loadDashboard();
 });
-for (const id of ['dash-status', 'dash-technician', 'dash-device', 'dash-interval']) {
+for (const id of ['dash-status', 'dash-technician', 'dash-device']) {
   document.getElementById(id).addEventListener('change', scheduleDashboard);
 }
 for (const id of ['dash-from', 'dash-to']) {
@@ -643,7 +653,6 @@ document.querySelectorAll('#dash-ranges .range-chip').forEach(btn => {
     else if (r !== 'today') from.setDate(today.getDate() - (Number(r) - 1));
     document.getElementById('dash-from').value = localDateInput(from);
     document.getElementById('dash-to').value = localDateInput(today);
-    document.getElementById('dash-interval').value = (r === '90' || r === 'year') ? (r === 'year' ? 'month' : 'week') : 'day';
     document.querySelectorAll('#dash-ranges .range-chip').forEach(b => b.classList.toggle('active', b === btn));
     loadDashboard();
   });
@@ -661,8 +670,7 @@ function dashboardQuery() {
     to: document.getElementById('dash-to').value,
     status: document.getElementById('dash-status').value,
     technician: document.getElementById('dash-technician').value,
-    device_type: document.getElementById('dash-device').value,
-    interval: document.getElementById('dash-interval').value
+    device_type: document.getElementById('dash-device').value
   });
 }
 
@@ -676,14 +684,17 @@ function updateDeviceOptions(deviceTypes) {
   }
 }
 
-async function loadDashboard() {
+async function loadDashboard(opts) {
+  const silent = !!(opts && opts.silent === true); // refresco automático: sin "Actualizando…"
   const seq = ++dashboardSeq;
   const state = document.getElementById('dashboard-state');
   const content = document.getElementById('dashboard-content');
   const firstLoad = content.classList.contains('hidden');
-  state.textContent = firstLoad ? 'Cargando datos del taller…' : 'Actualizando…';
-  state.classList.remove('error');
-  content.classList.add('is-loading');
+  if (!silent) {
+    state.textContent = firstLoad ? 'Cargando datos del taller…' : 'Actualizando…';
+    state.classList.remove('error');
+    content.classList.add('is-loading');
+  }
   try {
     const range = new URLSearchParams({ from: document.getElementById('dash-from').value, to: document.getElementById('dash-to').value });
     const [dashRes, insRes] = await Promise.all([
@@ -696,7 +707,10 @@ async function loadDashboard() {
     const insights = await insRes.json();
     if (!dashRes.ok) throw new Error(data.error || 'No se pudo cargar el panel.');
     if (!insRes.ok) throw new Error(insights.error || 'No se pudo cargar el panel.');
+    loadBackupStatus();
     updateDeviceOptions(data.deviceTypes || []);
+    peekCache.clear();
+    closePeek();
     renderDashboard(data);
     insightsData = insights;
     renderInsights(insights);
@@ -722,9 +736,32 @@ function renderDashboard(data) {
     ['Promesa vencida', data.summary.overdue, true],
     ['Listas esperando 48 h o más', data.summary.waitingPickup, true]
   ];
-  document.getElementById('dashboard-kpis').innerHTML = items.map(([label, value, alert]) => `
-    <div class="kpi-card${alert && value ? ' alert' : ''}"><span class="kpi-label">${esc(label)}</span>
-      <strong class="kpi-value">${Number(value) || 0}</strong></div>`).join('');
+  // Filtros del panel que también aplican a las tarjetas (no las fechas: son "ahora").
+  const kpiBase = {
+    status: document.getElementById('dash-status').value,
+    technician: document.getElementById('dash-technician').value,
+    device_type: document.getElementById('dash-device').value
+  };
+  const today = localDateInput(new Date());
+  const kpiParams = [
+    { from: today, to: today },
+    { open_only: '1' },
+    { status: 'En reparación' },
+    { status: 'Listo' },
+    { status: 'Entregado', completed_from: today, completed_to: today },
+    { aging_bucket: '3_plus' },
+    { overdue: '1' },
+    { status: 'Listo', pickup_bucket: 'over_48' }
+  ];
+  const kpis = document.getElementById('dashboard-kpis');
+  kpis.innerHTML = items.map(([label, value, alert], i) => `
+    <button type="button" class="kpi-card peekable${alert && value ? ' alert' : ''}" data-i="${i}">
+      <span class="kpi-label">${esc(label)}</span>
+      <strong class="kpi-value">${Number(value) || 0}</strong></button>`).join('');
+  kpis.querySelectorAll('.kpi-card').forEach(b => b.addEventListener('click', () => {
+    const [label] = items[b.dataset.i];
+    togglePeek(b, { title: label, params: { ...kpiBase, ...kpiParams[b.dataset.i] }, anchor: kpis });
+  }));
 
   const base = {
     from: document.getElementById('dash-from').value,
@@ -734,7 +771,6 @@ function renderDashboard(data) {
     device_type: document.getElementById('dash-device').value
   };
   const withBase = extra => ({ ...base, ...extra });
-  renderBars('chart-created', data.created, x => withBase({ from: x.from, to: x.to }));
   renderBars('chart-status', data.statuses, x => withBase({ status: x.label }));
 
   const technicianChart = document.getElementById('chart-technicians');
@@ -754,12 +790,17 @@ function renderDashboard(data) {
   renderBars('chart-aging', data.aging, (x, i) => withBase({ from: '', to: '', status: '', aging_bucket: agingKeys[i], open_only: '1' }));
   const pickupKeys = ['under_24', '1_2', '2_3', '3_plus'];
   renderBars('chart-pickup', data.pickupWaiting, (x, i) => withBase({ from: '', to: '', status: 'Listo', pickup_bucket: pickupKeys[i] }));
+  const dur = h => h < 48 ? `${Math.round(h * 10) / 10} h` : `${Math.round(h / 24 * 10) / 10} días`;
   const turnaroundItems = data.turnaround.byTechnician.filter(x => x.count > 0).map(x => ({
-    ...x, label: `${x.label} · ${x.count}`, display: `${x.value} h`, value: x.value
+    // Siempre en horas en las barras, para poder comparar técnicos de un vistazo.
+    ...x, label: `${x.label} · ${x.count}`, display: `${Math.round(x.value * 10) / 10} h`, value: x.value
   }));
-  document.getElementById('turnaround-summary').textContent = data.turnaround.medianHours === null
+  const t = data.turnaround;
+  document.getElementById('turnaround-summary').textContent = t.medianHours === null
     ? 'Sin entregas con marcas de tiempo válidas en este período.'
-    : `Mediana general: ${Math.round(data.turnaround.medianHours * 10) / 10} h · ${data.turnaround.completedCount} entregas.`;
+    : `Reparación típica (recibido → listo): ${dur(t.medianHours)}` +
+      (t.medianPickupHours !== null ? ` · Espera típica de recogida (listo → entregado): ${dur(t.medianPickupHours)}` : '') +
+      ` · ${t.completedCount} entregas. "Típica" = la mitad tarda menos y la otra mitad más (mediana); cuenta horas de calendario, incluidas noches y domingos.`;
   renderBars('chart-turnaround', turnaroundItems, x => withBase({ from: '', to: '', status: 'Entregado',
     technician: '', completed_technician: x.label.split(' · ')[0], completed_from: base.from, completed_to: base.to }), x => x.display);
 }
@@ -793,25 +834,32 @@ function addBarRows(target, items, paramsFor, valueOf = item => item.value, suff
     target.appendChild(empty);
     return;
   }
-  const values = items.map(item => Number(item.value) || 0);
-  const max = Math.max(1, ...values);
+  // La cifra de la barra sale de valueOf (antes "Entregadas por técnico"
+  // mostraba por error la cifra de pendientes).
+  const numberOf = item => { const v = valueOf(item); return typeof v === 'number' ? v : (Number(item.value) || 0); };
+  const max = Math.max(1, ...items.map(numberOf));
+  const panelTitle = (target.closest('.chart-panel')?.querySelector('h3')?.textContent || '').trim();
+  const section = target.lastElementChild?.classList.contains('chart-subheading') ? target.lastElementChild.textContent : '';
   items.forEach((item, index) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'bar-row';
-    const number = Number(item.value) || 0;
+    const number = numberOf(item);
     const display = typeof valueOf(item) === 'string' ? valueOf(item) : `${number}${suffix ? ` ${suffix}` : ''}`;
-    button.setAttribute('aria-label', `Abrir órdenes: ${item.label}, ${display}`);
+    button.setAttribute('aria-label', `Ver órdenes: ${item.label}, ${display}`);
     button.innerHTML = `<span class="bar-label">${esc(item.label)}</span>
       <progress class="bar-progress" max="${max}" value="${number}" aria-hidden="true"></progress>
       <span class="bar-value">${esc(display)}</span>`;
-    button.addEventListener('click', () => openOrdersFromChart(paramsFor(item, index)));
+    button.addEventListener('click', () => togglePeek(button, {
+      title: `${section ? section.charAt(0) + section.slice(1).toLowerCase() : panelTitle} · ${String(item.label).split(' · ')[0]}`,
+      params: paramsFor(item, index), anchor: target,
+    }));
     target.appendChild(button);
   });
 }
 
 function openOrdersFromChart(params) {
-  document.getElementById('orders-search').value = '';
+  document.getElementById('orders-search').value = params.search || '';
   document.getElementById('orders-from').value = params.from || '';
   document.getElementById('orders-to').value = params.to || '';
   document.getElementById('orders-technician').value = params.technician || '';
@@ -822,7 +870,7 @@ function openOrdersFromChart(params) {
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === 'orders'));
   document.querySelectorAll('main .view').forEach(v => v.classList.toggle('active', v.id === 'view-orders'));
   const query = new URLSearchParams(params);
-  const extraIds = ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned'];
+  const extraIds = ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned', 'warranty_only'];
   extraIds.forEach(key => {
     const value = query.get(key);
     if (value) document.getElementById('orders-list').dataset[key] = value;
@@ -1028,13 +1076,24 @@ function renderInsights(ins) {
     ['Garantías del período', s.warrantyClaims, plain, true,
       s.warrantyClaims.value ? `${s.warrantyCovered} cubiertas por el taller` : ''],
   ];
-  document.getElementById('dash-compare').innerHTML = cards.map(([label, m, fmt, inverse, extra = '']) => `
-    <div class="compare-card"><span class="kpi-label">${esc(label)}</span>
+  // Qué órdenes hay detrás de cada tarjeta (el promedio no es una lista).
+  const compareParams = [
+    { from: p.from, to: p.to },
+    { status: 'Entregado', completed_from: p.from, completed_to: p.to },
+    { status: 'Entregado', completed_from: p.from, completed_to: p.to },
+    null,
+    { from: p.from, to: p.to, warranty_only: '1' },
+  ];
+  const compare = document.getElementById('dash-compare');
+  compare.innerHTML = cards.map(([label, m, fmt, inverse, extra = ''], i) => `
+    <${compareParams[i] ? `button type="button" class="compare-card peekable" data-i="${i}"` : 'div class="compare-card"'}><span class="kpi-label">${esc(label)}</span>
       <strong class="kpi-value">${esc(fmt(m.value))}</strong>${extra ? `<span class="compare-extra">${esc(extra)}</span>` : ''}
       <span class="compare-prev">${changeBadge(m.change, { inverse: !!inverse })} <small>antes: ${esc(fmt(m.previous))}</small></span>
-    </div>`).join('') + (s.pricedShare !== null && s.pricedShare < 100
+    </${compareParams[i] ? 'button' : 'div'}>`).join('') + (s.pricedShare !== null && s.pricedShare < 100
       ? `<p class="compare-note">Solo ${s.pricedShare}% de las órdenes entregadas tienen precio anotado. Para ingresos exactos, llena "Precio acordado" al recibir cada equipo.</p>` : '');
 
+  compare.querySelectorAll('.compare-card.peekable').forEach(b => b.addEventListener('click', () =>
+    togglePeek(b, { title: `${cards[b.dataset.i][0]} (período)`, params: compareParams[b.dataset.i], anchor: compare })));
   renderMoney(ins.pipeline);
   renderCustomers(ins.customers);
   renderSegments(ins.segments);
@@ -1053,8 +1112,12 @@ function renderMoney(pl) {
     box('Recibido (sin empezar)', pl.received, '', 'Recibido') +
     box('En reparación', pl.inRepair, '', 'En reparación') +
     box('Listo para cobrar', pl.ready, 'money-ready', 'Listo');
-  document.querySelectorAll('#dash-money .money-card').forEach(b => b.addEventListener('click', () =>
-    openOrdersFromChart({ status: b.dataset.status, open_only: b.dataset.status ? '' : '1' })));
+  const moneyGrid = document.getElementById('dash-money');
+  moneyGrid.querySelectorAll('.money-card').forEach(b => b.addEventListener('click', () => {
+    const status = b.dataset.status;
+    togglePeek(b, { title: b.querySelector('.kpi-label').textContent,
+      params: status ? { status } : { open_only: '1' }, anchor: moneyGrid, money: true });
+  }));
   const notes = [`Cobrado hoy: ${money(pl.collectedToday)}.`];
   if (pl.readyWaiting48h.count) notes.push(`${money(pl.readyWaiting48h.value)} en ${pl.readyWaiting48h.count} órdenes listas hace más de 48 h: llama a esos clientes.`);
   if (pl.open.withoutPrice) notes.push(`${pl.open.withoutPrice} órdenes abiertas no tienen precio: edítalas para que el total sea exacto.`);
@@ -1083,7 +1146,7 @@ function drawCustomerTable() {
   const shown = list.slice(0, q ? 50 : 15);
   document.getElementById('cust-table').innerHTML = `
     <thead><tr><th>Cliente</th><th>Teléfono</th><th class="num">Visitas</th><th class="num">Gastado</th><th>Última visita</th><th>Equipos</th><th>Promos</th></tr></thead>
-    <tbody>${shown.map(c => `<tr>
+    <tbody>${shown.map((c, i) => `<tr class="peekable-row" tabindex="0" data-i="${i}">
       <td><strong>${esc(c.name)}</strong>${c.warrantyClaims ? ` <span class="pill pill-warn">${c.warrantyClaims} garantía${c.warrantyClaims > 1 ? 's' : ''}</span>` : ''}</td>
       <td>${esc(c.phone || '—')}</td>
       <td class="num">${c.visits}</td>
@@ -1093,6 +1156,14 @@ function drawCustomerTable() {
       <td>${c.optIn ? '<span class="pill pill-ok">Sí</span>' : '<span class="pill">No</span>'}</td>
     </tr>`).join('') || '<tr><td colspan="7" class="muted">Sin clientes.</td></tr>'}</tbody>`
     + (list.length > shown.length ? `<caption class="table-more">Mostrando ${shown.length} de ${list.length}. Busca o descarga el CSV para ver todos.</caption>` : '');
+  const table = document.getElementById('cust-table');
+  table.querySelectorAll('.peekable-row').forEach(row => {
+    const c = shown[row.dataset.i];
+    const open = () => togglePeek(row, { title: `Órdenes de ${c.name}`,
+      params: { search: c.phone ? c.phone.replace(/\D/g, '') : c.name }, anchor: table.parentElement });
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+  });
 }
 document.getElementById('cust-search').addEventListener('input', drawCustomerTable);
 document.getElementById('cust-export').addEventListener('click', () => {
@@ -1217,3 +1288,147 @@ function renderCustomerMatch(c) {
     document.querySelector('.tab[data-view=orders]').click();
   }));
 }
+
+// ---------- Vista rápida: clic en tarjeta o barra -> 6 órdenes más recientes ----------
+// Una sola lista abierta a la vez (segundo clic o Esc la cierra). Cada consulta
+// pide solo 6 órdenes y se guarda en memoria hasta que cambian los filtros.
+const peekCache = new Map();
+let peekKey = null;
+let peekSeq = 0;
+let peekTrigger = null;
+
+function closePeek() {
+  peekKey = null;
+  peekSeq++;
+  document.getElementById('peek')?.remove();
+  if (peekTrigger) {
+    peekTrigger.classList.remove('is-open');
+    peekTrigger.setAttribute('aria-expanded', 'false');
+  }
+  peekTrigger = null;
+}
+
+function timeAgo(dateStr) {
+  if (!dateStr) return '';
+  const ms = Date.now() - Date.parse(dateStr.replace(' ', 'T'));
+  const h = Math.floor(ms / 3600000);
+  if (h < 1) return 'hace minutos';
+  if (h < 24) return `hace ${h} h`;
+  const d = Math.floor(h / 24);
+  return `hace ${d} ${d === 1 ? 'día' : 'días'}`;
+}
+
+function cleanParams(params) {
+  return Object.fromEntries(Object.entries(params).filter(([, v]) => v !== '' && v !== null && v !== undefined));
+}
+
+async function togglePeek(trigger, { title, params, anchor, money = false }) {
+  const clean = cleanParams(params);
+  const key = new URLSearchParams(clean).toString();
+  if (peekTrigger === trigger && peekKey === key) return closePeek();
+  closePeek();
+  peekKey = key;
+  peekTrigger = trigger;
+  trigger.classList.add('is-open');
+  trigger.setAttribute('aria-expanded', 'true');
+  const el = document.createElement('div');
+  el.id = 'peek';
+  el.className = 'peek' + (money ? ' peek-dark' : '');
+  el.setAttribute('aria-live', 'polite');
+  el.innerHTML = '<p class="drop-empty">Cargando…</p>';
+  anchor.after(el);
+  const seq = ++peekSeq;
+  try {
+    let data = peekCache.get(key);
+    if (!data) {
+      const r = await api('/api/orders?' + new URLSearchParams({ ...clean, limit: '6' }));
+      if (r.status === 401) return sessionExpired();
+      if (!r.ok) throw new Error();
+      data = { orders: await r.json(), total: Number(r.headers.get('X-Total-Count')) || 0 };
+      peekCache.set(key, data);
+    }
+    if (seq !== peekSeq) return; // el usuario ya abrió otra
+    renderPeek(el, title, clean, data);
+    if (el.getBoundingClientRect().bottom > window.innerHeight) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch {
+    if (seq === peekSeq) el.innerHTML = '<p class="drop-empty">No se pudo cargar. Revisa la conexión.</p>';
+  }
+}
+
+function renderPeek(el, title, params, { orders, total }) {
+  const dev = o => `${o.device_type === 'Otro' || o.model.toLowerCase().startsWith(o.device_type.toLowerCase()) ? '' : o.device_type + ' '}${o.model}`;
+  const oneStatus = !!params.status;
+  el.innerHTML = `
+    <div class="drop-head">
+      <strong>${esc(title)}</strong>
+      <span>${orders.length ? `Las ${orders.length} más recientes de ${total}` : ''}</span>
+      <button type="button" class="drop-close" aria-label="Cerrar lista">✕</button>
+    </div>
+    ${orders.length ? `<ul class="drop-list">${orders.map(o => `
+      <li><button type="button" class="drop-item" data-ticket="${esc(o.ticket)}">
+        <span class="drop-ticket">${esc(o.ticket)}</span>
+        <span class="drop-main"><strong>${esc(o.customer_name)}</strong> · ${esc(dev(o))}
+          <small>${esc(o.problems.join(', '))}${oneStatus ? '' : ` · <span class="status-badge ${statusCssClass(o.status)}">${esc(o.status)}</span>`}</small></span>
+        <span class="drop-side"><strong>${o.price !== null && o.price !== undefined ? esc(money(o.price)) : '<em>sin precio</em>'}</strong>
+          <small>${esc(`${o.status} ${timeAgo(o.status_changed_at || o.created_at)}`)}</small></span>
+      </button></li>`).join('')}</ul>` : '<p class="drop-empty">No hay órdenes aquí.</p>'}
+    ${total > orders.length ? `<button type="button" class="drop-all">Ver todas (${total}) →</button>` : ''}`;
+  el.querySelector('.drop-close').addEventListener('click', closePeek);
+  el.querySelectorAll('.drop-item').forEach(b => b.addEventListener('click', () => goToOrder(b.dataset.ticket)));
+  el.querySelector('.drop-all')?.addEventListener('click', () => { closePeek(); openOrdersFromChart(params); });
+}
+
+// Abre la pestaña Órdenes mostrando solo esa orden (búsqueda por ticket).
+function goToOrder(ticket) {
+  closePeek();
+  openOrdersFromChart({ search: ticket }); // limpia filtros, busca el ticket y cambia de pestaña
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && peekKey !== null) closePeek(); });
+
+// ---------- Aviso de respaldos automáticos ----------
+async function loadBackupStatus() {
+  const el = document.getElementById('dash-backup');
+  try {
+    const r = await api('/api/backup-status');
+    if (!r.ok) return el.classList.add('hidden');
+    const b = await r.json();
+    el.classList.remove('hidden', 'warn');
+    if (!b.enabled) {
+      el.classList.add('warn');
+      el.textContent = '⚠ Respaldos automáticos desactivados en el servidor.';
+    } else if (b.lastError && (!b.lastAt || b.lastError > b.lastAt)) {
+      el.classList.add('warn');
+      el.textContent = '⚠ El último respaldo automático falló. Avisa a quien administra el servidor.';
+    } else if (b.lastAt) {
+      // lastAt viene en UTC (ISO con Z): se compara directamente con la hora actual.
+      const min = Math.max(0, Math.round((Date.now() - Date.parse(b.lastAt)) / 60000));
+      const ago = min < 1 ? 'hace menos de 1 minuto' : min < 60 ? `hace ${min} min` : min < 1440 ? `hace ${Math.round(min / 60)} h` : `hace ${Math.round(min / 1440)} días`;
+      el.textContent = `🛡 Último respaldo automático: ${ago}${b.pending ? ' · hay cambios nuevos: se respaldan en 1 minuto' : ''}`;
+    } else {
+      el.textContent = '🛡 Respaldos automáticos activos: el primero se crea con el próximo cambio.';
+    }
+  } catch { el.classList.add('hidden'); }
+}
+
+// ---------- Siempre al día: refresco automático entre equipos ----------
+// Todo se guarda en el servidor al instante. Esto solo trae lo que cambiaron
+// otras personas: cada 30 s si la pestaña está visible, y al volver a la app.
+// No interrumpe: espera si hay un formulario, una lista desplegada o un
+// historial abierto.
+const LIVE_REFRESH_MS = 30 * 1000;
+function busyOnScreen() {
+  return !document.getElementById('edit-modal').classList.contains('hidden') ||
+    !document.getElementById('warranty-modal').classList.contains('hidden') ||
+    peekKey !== null ||
+    !!document.querySelector('.order-history:not(.hidden)') ||
+    document.activeElement?.id === 'orders-search';
+}
+function liveRefresh() {
+  if (!currentUser || document.visibilityState !== 'visible' || busyOnScreen()) return;
+  const view = document.querySelector('main .view.active')?.id;
+  if (view === 'view-orders') loadOrders({ keepPage: true });
+  else if (view === 'view-dashboard') loadDashboard({ silent: true });
+}
+setInterval(liveRefresh, LIVE_REFRESH_MS);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') liveRefresh(); });

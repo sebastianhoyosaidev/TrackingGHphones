@@ -12,6 +12,7 @@ process.env.TZ = process.env.TZ || 'America/New_York';
 const express = require('express');
 const path = require('path');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
 
 const app = express();
@@ -29,6 +30,13 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '1mb' }));
+// Cada cambio guardado con éxito en /api/orders* programa un respaldo automático.
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.path.startsWith('/api/orders')) {
+    res.on('finish', () => { if (res.statusCode < 400) scheduleBackup(); });
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
 // Límite de peticiones por IP (simple, en memoria). Los máximos se pueden
@@ -76,7 +84,87 @@ app.use('/api/orders', requireAuth); // login obligatorio en todo lo del taller
 // DB_FILE permite usar otra base (p. ej. demo.db para el taller simulado).
 // Por defecto, la base real: backend/repairshop.db.
 const DB_FILE = path.resolve(__dirname, process.env.DB_FILE || 'repairshop.db');
+const dbExisted = fs.existsSync(DB_FILE);
 const db = new DatabaseSync(DB_FILE);
+
+// ============ RESPALDOS AUTOMÁTICOS ============
+// Un respaldo después de cada cambio (esperando 1 min sin cambios, máx. 10 min,
+// para no hacer una copia por clic), uno al arrancar (antes de migrar) y uno
+// al apagar. Cada copia se verifica. Se guardan las 48 más recientes y una por
+// día durante 30 días; el resto se borra solo. VACUUM INTO hace una copia
+// consistente aunque la app esté escribiendo.
+// AUTO_BACKUP=0 lo desactiva; BACKUP_DIR cambia la carpeta (defecto backend/backups).
+// Nota: estas copias viven en el mismo servidor. Protegen de errores y de una
+// base dañada, NO de perder el servidor: copia la carpeta fuera (ver README).
+const AUTO_BACKUP = process.env.AUTO_BACKUP !== '0' && process.env.NO_LISTEN !== '1';
+const BACKUP_DIR = path.resolve(__dirname, process.env.BACKUP_DIR || 'backups');
+const BACKUP_KEEP_RECENT = 48;
+const BACKUP_KEEP_DAYS = 30;
+const BACKUP_DELAY_MS = 60 * 1000;
+const BACKUP_MAX_WAIT_MS = 10 * 60 * 1000;
+const backupPrefix = `${path.basename(DB_FILE, '.db')}-auto-`;
+const backupState = { lastFile: null, lastAt: null, lastError: null, pending: false };
+let backupTimer = null;
+let backupPendingSince = 0;
+
+function backupStamp(d = new Date()) {
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}-${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
+function runBackup(reason) {
+  clearTimeout(backupTimer);
+  backupTimer = null;
+  backupPendingSince = 0;
+  backupState.pending = false;
+  if (!AUTO_BACKUP) return;
+  const dest = path.join(BACKUP_DIR, `${backupPrefix}${backupStamp()}.db`);
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    db.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
+    // Verificación: la copia debe abrir, pasar quick_check y tener la tabla de órdenes.
+    const check = new DatabaseSync(dest, { readOnly: true });
+    try {
+      const ok = check.prepare('PRAGMA quick_check').get().quick_check === 'ok';
+      check.prepare('SELECT COUNT(*) AS n FROM orders').get();
+      if (!ok) throw new Error('quick_check falló');
+    } finally { check.close(); }
+    backupState.lastFile = path.basename(dest);
+    backupState.lastAt = new Date().toISOString();
+    backupState.lastError = null;
+    pruneBackups();
+  } catch (e) {
+    try { fs.unlinkSync(dest); } catch { /* no se creó */ }
+    backupState.lastError = `${new Date().toISOString()} ${e.message}`;
+    console.error(`[respaldo ${reason}] ERROR:`, e.message);
+  }
+}
+
+function pruneBackups() {
+  const files = fs.readdirSync(BACKUP_DIR)
+    .filter(f => f.startsWith(backupPrefix) && f.endsWith('.db')).sort().reverse(); // más nuevas primero
+  const cutoff = backupStamp(new Date(Date.now() - BACKUP_KEEP_DAYS * 86400000)).slice(0, 8);
+  const daysKept = new Set();
+  files.forEach((f, i) => {
+    const dayKey = f.slice(backupPrefix.length, backupPrefix.length + 8); // YYYYMMDD
+    if (i < BACKUP_KEEP_RECENT) { daysKept.add(dayKey); return; }
+    if (dayKey >= cutoff && !daysKept.has(dayKey)) { daysKept.add(dayKey); return; } // la más nueva de cada día
+    try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch { /* ignora */ }
+  });
+}
+
+function scheduleBackup() {
+  if (!AUTO_BACKUP) return;
+  const now = Date.now();
+  if (!backupPendingSince) backupPendingSince = now;
+  backupState.pending = true;
+  clearTimeout(backupTimer);
+  const wait = Math.max(0, Math.min(BACKUP_DELAY_MS, backupPendingSince + BACKUP_MAX_WAIT_MS - now));
+  backupTimer = setTimeout(() => runBackup('cambios'), wait);
+}
+
+// Copia de seguridad al arrancar, ANTES de cualquier migración del esquema.
+if (dbExisted) runBackup('arranque');
 // WAL: las lecturas no bloquean a las escrituras (y viceversa); busy_timeout
 // de 5 s para esperar el candado en vez de fallar de inmediato.
 db.exec('PRAGMA journal_mode = WAL;');
@@ -194,20 +282,45 @@ if (!eventCols.includes('previous_technician')) {
 if (!eventCols.includes('details')) {
   db.exec('ALTER TABLE order_events ADD COLUMN details TEXT');
 }
-db.exec(`
-  INSERT OR IGNORE INTO order_events
-    (order_id, ticket, event_type, from_status, to_status, actor, created_at)
-  SELECT o.id, o.ticket, 'status', NULL, 'Recibido', 'sistema', o.created_at
-  FROM orders o
-  WHERE NOT EXISTS (
-    SELECT 1 FROM order_events e WHERE e.order_id = o.id AND e.event_type = 'status'
-  );
-  INSERT OR IGNORE INTO order_events
-    (order_id, ticket, event_type, from_status, to_status, actor, source_audit_id, created_at)
-  SELECT a.order_id, a.ticket, 'status', a.from_status, a.to_status,
-         a.actor, a.id, a.created_at
-  FROM audit_log a;
-`);
+// v1.4.0 — corrección de duplicados: hasta v1.3.0, cada cambio de estado hecho
+// en la app se guardaba en audit_log Y en order_events sin enlazarlos, y este
+// paso de arranque volvía a copiar audit_log -> order_events (sin técnico).
+// Resultado: tras cada reinicio, el historial y las métricas de entregas se
+// duplicaban. Ahora:
+//   1) se borran las copias importadas que duplican un evento ya registrado
+//      por la app (se conserva el original, que sí tiene el técnico);
+//   2) solo se importa de audit_log lo que no exista ya en order_events;
+//   3) logStatusChange enlaza ambos registros (source_audit_id).
+withTransaction(() => {
+  db.exec(`
+    DELETE FROM order_events
+    WHERE source_audit_id IS NOT NULL AND EXISTS (
+      SELECT 1 FROM order_events o
+      WHERE o.id <> order_events.id AND o.source_audit_id IS NULL
+        AND o.order_id = order_events.order_id AND o.event_type = 'status'
+        AND COALESCE(o.from_status, '') = COALESCE(order_events.from_status, '')
+        AND o.to_status = order_events.to_status AND o.created_at = order_events.created_at
+    );
+    INSERT OR IGNORE INTO order_events
+      (order_id, ticket, event_type, from_status, to_status, actor, created_at)
+    SELECT o.id, o.ticket, 'status', NULL, 'Recibido', 'sistema', o.created_at
+    FROM orders o
+    WHERE NOT EXISTS (
+      SELECT 1 FROM order_events e WHERE e.order_id = o.id AND e.event_type = 'status'
+    );
+    INSERT OR IGNORE INTO order_events
+      (order_id, ticket, event_type, from_status, to_status, actor, source_audit_id, created_at)
+    SELECT a.order_id, a.ticket, 'status', a.from_status, a.to_status,
+           a.actor, a.id, a.created_at
+    FROM audit_log a
+    WHERE NOT EXISTS (
+      SELECT 1 FROM order_events e
+      WHERE e.order_id = a.order_id AND e.event_type = 'status'
+        AND COALESCE(e.from_status, '') = COALESCE(a.from_status, '')
+        AND e.to_status = a.to_status AND e.created_at = a.created_at
+    );
+  `);
+});
 
 // Código de consulta del cliente: aleatorio e imposible de adivinar.
 // El ticket (GH-0001...) sigue siendo secuencial para uso interno del taller,
@@ -404,22 +517,24 @@ function generateCustomerCode() {
 const STATUSES = ['Recibido', 'En reparación', 'Listo', 'Entregado'];
 const TECHNICIANS = ['Fabio', 'Oliver', 'Sebastian', 'Fernando', 'Maria', 'Elder'];
 
-function recordOrderEvent(orderId, ticket, eventType, fromStatus, toStatus, actor, assignedTechnician = null, previousTechnician = null) {
+function recordOrderEvent(orderId, ticket, eventType, fromStatus, toStatus, actor, assignedTechnician = null, previousTechnician = null, sourceAuditId = null) {
   db.prepare(`
     INSERT INTO order_events
-      (order_id, ticket, event_type, from_status, to_status, previous_technician, assigned_technician, actor)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (order_id, ticket, event_type, from_status, to_status, previous_technician, assigned_technician, actor, source_audit_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(orderId, ticket, eventType, fromStatus, toStatus, previousTechnician || null,
-    assignedTechnician || null, actor || 'staff');
+    assignedTechnician || null, actor || 'staff', sourceAuditId);
 }
 
 // Auditoría de cambios de estado. actor = usuario autenticado de la sesión.
 function logStatusChange(orderId, ticket, fromStatus, toStatus, actor, assignedTechnician = null) {
-  db.prepare(`
+  const audit = db.prepare(`
     INSERT INTO audit_log (order_id, ticket, from_status, to_status, actor)
     VALUES (?, ?, ?, ?, ?)
   `).run(orderId, ticket, fromStatus, toStatus, actor);
-  recordOrderEvent(orderId, ticket, 'status', fromStatus, toStatus, actor, assignedTechnician);
+  // Enlazado con source_audit_id para que el arranque no lo vuelva a importar.
+  recordOrderEvent(orderId, ticket, 'status', fromStatus, toStatus, actor, assignedTechnician, null,
+    Number(audit.lastInsertRowid));
 }
 
 function nextTicket() {
@@ -585,8 +700,9 @@ function readOrderFilters(query) {
     completedTechnician: typeof query.completed_technician === 'string' && TECHNICIANS.includes(query.completed_technician) ? query.completed_technician : '',
     completedFrom: localDateOnly(query.completed_from) ? query.completed_from : '',
     completedTo: localDateOnly(query.completed_to) ? query.completed_to : '',
-    agingBucket: ['0_1', '2_3', '4_7', '8_plus'].includes(query.aging_bucket) ? query.aging_bucket : '',
-    pickupBucket: ['under_24', '1_2', '2_3', '3_plus'].includes(query.pickup_bucket) ? query.pickup_bucket : '',
+    agingBucket: ['0_1', '2_3', '4_7', '8_plus', '3_plus'].includes(query.aging_bucket) ? query.aging_bucket : '',
+    pickupBucket: ['under_24', '1_2', '2_3', '3_plus', 'over_48'].includes(query.pickup_bucket) ? query.pickup_bucket : '',
+    warrantyOnly: query.warranty_only === '1',
     openOnly: query.open_only === '1',
     overdueOnly: query.overdue === '1',
     unassignedOnly: query.unassigned === '1',
@@ -606,9 +722,13 @@ function buildOrderWhere(filters) {
   if (filters.problem) { clauses.push("EXISTS (SELECT 1 FROM json_each(orders.problems) WHERE value = ?)"); params.push(filters.problem); }
   if (filters.openOnly) clauses.push("orders.status <> 'Entregado'");
   if (filters.unassignedOnly) clauses.push('orders.assigned_technician IS NULL');
+  if (filters.warrantyOnly) clauses.push('orders.warranty_of IS NOT NULL');
   if (filters.overdueOnly) clauses.push("orders.status <> 'Entregado' AND orders.promised_at < date('now', 'localtime')");
   if (filters.agingBucket) {
-    const bounds = { '0_1': [-2, null], '2_3': [-4, -2], '4_7': [-8, -4], '8_plus': [null, -8] }[filters.agingBucket];
+    // 3_plus = "Abiertas 3 días o más" del panel (mismo corte de 72 h).
+    // [más reciente, más antiguo]: 2_3 = creada hace entre 2 y 4 días.
+    // (Antes 2_3 y 4_7 tenían los límites al revés y siempre salían vacías.)
+    const bounds = { '0_1': [-2, null], '2_3': [-2, -4], '4_7': [-4, -8], '8_plus': [null, -8], '3_plus': [null, -3] }[filters.agingBucket];
     clauses.push("orders.status <> 'Entregado'");
     if (bounds[0] !== null && bounds[1] !== null) {
       clauses.push("orders.created_at < datetime('now', 'localtime', ?) AND orders.created_at >= datetime('now', 'localtime', ?)");
@@ -620,7 +740,8 @@ function buildOrderWhere(filters) {
     }
   }
   if (filters.pickupBucket) {
-    const bounds = { under_24: [null, -24], '1_2': [-24, -48], '2_3': [-48, -72], '3_plus': [-72, null] }[filters.pickupBucket];
+    // over_48 = "Listas esperando 48 h o más" del panel.
+    const bounds = { under_24: [null, -24], '1_2': [-24, -48], '2_3': [-48, -72], '3_plus': [-72, null], over_48: [-48, null] }[filters.pickupBucket];
     clauses.push("orders.status = 'Listo'");
     const readyTime = "(SELECT MAX(e.created_at) FROM order_events e WHERE e.order_id = orders.id AND e.event_type = 'status' AND e.to_status = 'Listo')";
     if (bounds[0] === null) clauses.push(`${readyTime} >= datetime('now', 'localtime', ?)`), params.push(`${bounds[1]} hours`);
@@ -813,10 +934,24 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
       if (filters.problem && !JSON.parse(e.problems || '[]').includes(filters.problem)) return false;
       return true;
     });
-  const turnaround = completed.map(e => ({
-    technician: e.assigned_technician,
-    hours: Math.max(0, (dateMs(e.created_at) - dateMs(e.order_created_at)) / 3600000),
-  }));
+  // Tiempo de REPARACIÓN = de recibido a la primera vez que quedó "Listo".
+  // (Antes se medía hasta "Entregado", lo que sumaba los días que el equipo
+  // esperaba a que el cliente lo recogiera.) La espera de recogida se mide
+  // aparte: de "Listo" a "Entregado". Horas de calendario (incluye noches).
+  const firstListo = new Map();
+  for (const ev of db.prepare(`SELECT order_id, MIN(created_at) AS at FROM order_events
+      WHERE event_type = 'status' AND to_status = 'Listo' GROUP BY order_id`).all()) {
+    firstListo.set(ev.order_id, ev.at);
+  }
+  const turnaround = completed.map(e => {
+    const listo = firstListo.get(e.order_id);
+    const end = listo || e.created_at; // sin paso por "Listo": se usa la entrega
+    return {
+      technician: e.assigned_technician,
+      hours: Math.max(0, (dateMs(end) - dateMs(e.order_created_at)) / 3600000),
+      pickupHours: listo ? Math.max(0, (dateMs(e.created_at) - dateMs(listo)) / 3600000) : null,
+    };
+  });
   const median = values => {
     if (!values.length) return null;
     const sorted = [...values].sort((a, b) => a - b);
@@ -873,7 +1008,11 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
     issues: countBy(rangeOrders.flatMap(o => JSON.parse(o.problems || '[]')), p => p).slice(0, 10),
     aging,
     pickupWaiting,
-    turnaround: { medianHours: median(turnaround.map(t => t.hours)), completedCount: turnaround.length, byTechnician: turnaroundByTechnician },
+    turnaround: {
+      medianHours: median(turnaround.map(t => t.hours)),
+      medianPickupHours: median(turnaround.filter(t => t.pickupHours !== null).map(t => t.pickupHours)),
+      completedCount: turnaround.length, byTechnician: turnaroundByTechnician,
+    },
     techniciansRoster: TECHNICIANS,
     deviceTypes: db.prepare('SELECT DISTINCT device_type FROM orders ORDER BY device_type').all().map(r => r.device_type),
   });
@@ -1359,6 +1498,12 @@ app.get('/api/track/:code', trackRateLimit, (req, res) => {
 app.post('/api/orders/:id/advance', (req, res) => {
   const row = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Orden no encontrada.' });
+  // Si la pantalla estaba desactualizada (otra persona ya cambió el estado
+  // desde otro equipo), no se avanza dos veces: se avisa.
+  const expected = req.body && typeof req.body.from === 'string' ? req.body.from : null;
+  if (expected && expected !== row.status) {
+    return res.status(409).json({ error: `Otra persona ya cambió esta orden a "${row.status}". Se actualizó la lista.` });
+  }
   const idx = STATUSES.indexOf(row.status);
   if (idx < 0 || idx >= STATUSES.length - 1) {
     return res.status(400).json({ error: 'La orden ya está entregada.' });
@@ -1415,6 +1560,12 @@ app.delete('/api/orders/:id', (req, res) => {
 app.put('/api/orders/:id', (req, res) => {
   const existing = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Orden no encontrada.' });
+  // Ediciones simultáneas: si la orden cambió desde que se abrió el formulario
+  // (otra persona, otro equipo), no se sobrescribe en silencio.
+  if (req.body && typeof req.body.expected_updated_at === 'string' &&
+      req.body.expected_updated_at !== existing.updated_at) {
+    return res.status(409).json({ error: 'Otra persona cambió esta orden mientras la editabas. Cierra y vuelve a abrirla para ver sus cambios; los tuyos no se guardaron.' });
+  }
   // Quién lo recibió no se puede cambiar desde el cliente: se conserva.
   if (req.body && typeof req.body === 'object') req.body.received_by = existing.received_by;
   const errors = validateOrder(req.body);
@@ -1484,8 +1635,21 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ error: status === 500 ? 'Error interno del servidor.' : (err.message || 'Error.') });
 });
 
+// Estado de los respaldos (para el aviso del panel).
+app.get('/api/backup-status', staffRateLimit, requireAuth, (req, res) => {
+  res.json({ enabled: AUTO_BACKUP, ...backupState });
+});
+
 // NO_LISTEN=1: solo prepara la base (lo usa seed-demo.js), sin abrir el puerto.
 if (process.env.NO_LISTEN !== '1') {
+  // Al apagar (pm2/systemd envían SIGTERM; Ctrl+C es SIGINT) se hace el
+  // respaldo pendiente antes de salir.
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.once(signal, () => {
+      if (backupState.pending) runBackup('apagado');
+      process.exit(0);
+    });
+  }
   app.listen(PORT, () => {
     console.log(`Órdenes de Reparación corriendo en http://localhost:${PORT}`);
     console.log(`Modo: ${process.env.NODE_ENV || 'development'}`);

@@ -58,7 +58,8 @@
   <section id="view-dashboard" class="view dashboard-view">
     <div class="dashboard-heading">
       <div><p class="eyebrow">GEEKS HOLLYWOOD · OPERACIONES</p><h2>Panel del taller</h2>
-        <p class="muted" id="dash-period-label">Seguimiento de órdenes, clientes y repuestos.</p></div>
+        <p class="muted" id="dash-period-label">Seguimiento de órdenes, clientes y repuestos.</p>
+        <p class="backup-line hidden" id="dash-backup" role="status"></p></div>
       <button type="button" class="btn-secondary" id="dashboard-export">Descargar órdenes (CSV)</button>
     </div>
 
@@ -77,7 +78,6 @@
       <label>Estado<select id="dash-status"><option value="">Todos los estados</option><option>Recibido</option><option>En reparación</option><option>Listo</option><option>Entregado</option></select></label>
       <label>Técnico<select id="dash-technician"><option value="">Todos los técnicos</option></select></label>
       <label>Equipo<select id="dash-device"><option value="">Todos los equipos</option></select></label>
-      <label>Agrupar por<select id="dash-interval"><option value="day">Día</option><option value="week">Semana</option><option value="month">Mes</option></select></label>
     </form>
 
     <nav class="subtabs" id="dash-subtabs" aria-label="Secciones del panel">
@@ -100,16 +100,15 @@
         <div class="compare-grid" id="dash-compare" aria-label="Comparado con el período anterior"></div>
         <div class="kpi-grid" id="dashboard-kpis" aria-label="Indicadores del taller"></div>
         <div class="dashboard-grid">
-          <section class="chart-panel chart-panel-wide"><h3>Órdenes creadas por período</h3><div id="chart-created" class="bar-chart"></div></section>
           <section class="chart-panel"><h3>Órdenes por estado</h3><div id="chart-status" class="bar-chart"></div></section>
           <section class="chart-panel"><h3>Carga y entregas por técnico</h3><div id="chart-technicians" class="bar-chart"></div></section>
           <section class="chart-panel"><h3>Equipos</h3><div id="chart-devices" class="bar-chart"></div></section>
           <section class="chart-panel"><h3>Problemas más frecuentes</h3><div id="chart-issues" class="bar-chart"></div></section>
           <section class="chart-panel"><h3>Antigüedad de órdenes abiertas</h3><p class="chart-note">Envejecida: abierta durante 3 días o más.</p><div id="chart-aging" class="bar-chart"></div></section>
           <section class="chart-panel"><h3>Tiempo esperando recogida</h3><p class="chart-note">Atrasada para recogida después de 48 horas en Listo.</p><div id="chart-pickup" class="bar-chart"></div></section>
-          <section class="chart-panel chart-panel-wide"><h3>Tiempo de reparación</h3><p id="turnaround-summary" class="chart-note"></p><div id="chart-turnaround" class="bar-chart"></div></section>
+          <section class="chart-panel chart-panel-wide"><h3>Tiempo de reparación por técnico (recibido → listo)</h3><p id="turnaround-summary" class="chart-note"></p><div id="chart-turnaround" class="bar-chart"></div></section>
         </div>
-        <p class="dashboard-footnote">Toca cualquier barra para ver esas órdenes. Los porcentajes comparan con el mismo número de días justo antes del período elegido. Ingresos = suma del "precio acordado" de las órdenes entregadas en el período.</p>
+        <p class="dashboard-footnote">Toca cualquier barra para ver esas órdenes. Los porcentajes comparan con el mismo número de días justo antes del período elegido. Ingresos = suma del "precio acordado" de las órdenes entregadas en el período. El tiempo de reparación va de recibido a listo; la espera de recogida (listo → entregado) se muestra aparte.</p>
       </div>
 
       <!-- Clientes -->

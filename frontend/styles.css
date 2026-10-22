@@ -231,7 +231,7 @@ textarea { resize: vertical; }
 .dashboard-heading p { margin: 4px 0 0; }
 .dashboard-heading .eyebrow { margin: 0 0 5px; color: var(--brand-blue); font-weight: 800; font-size: .72rem; letter-spacing: .12em; }
 .dashboard-heading .btn-secondary { width: auto; padding: 12px 16px; white-space: nowrap; }
-.dashboard-filters { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 10px; align-items: end; padding: 14px; background: #fff; border: 1px solid var(--border); border-radius: var(--radius); }
+.dashboard-filters { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 10px; align-items: end; padding: 14px; background: #fff; border: 1px solid var(--border); border-radius: var(--radius); }
 .dashboard-filters label { margin: 0; font-size: .8rem; color: var(--muted); }
 .dashboard-filters input, .dashboard-filters select { margin-top: 3px; font-size: .9rem; padding: 10px; }
 .dashboard-filters .btn-primary { width: auto; padding: 11px 16px; font-size: .9rem; }
@@ -405,3 +405,45 @@ textarea { resize: vertical; }
 .btn-more { width: 100%; margin-top: 4px; }
 @media (max-width: 600px) { .match-row { flex-direction: column; align-items: stretch; } }
 .dashboard-state:empty { display: none; }
+
+/* ---------- Dinero por entrar: desplegable (v1.4.0) ---------- */
+.money-card { position: relative; }
+.money-card::after { content: "▾"; position: absolute; top: 10px; right: 12px; color: #8b939c; font-size: .8rem; transition: transform .15s; }
+.money-card.is-open { border-color: var(--brand-orange); background: #26262c; }
+.money-card.is-open::after { transform: rotate(180deg); color: var(--brand-orange); }
+.peek { margin: 10px 0 14px; background: #fff; color: var(--text); border: 1.5px solid var(--brand-orange); border-radius: 12px; padding: 12px; box-shadow: 0 8px 24px rgba(11,11,12,.12); animation: paneIn .18s ease; }
+.peek-dark { border-color: #2c2c33; box-shadow: none; }
+.chart-panel .peek { margin-bottom: 0; }
+.drop-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.drop-head span { color: var(--muted); font-size: .82rem; }
+.drop-close { margin-left: auto; background: none; border: none; font-size: 1rem; color: var(--muted); cursor: pointer; padding: 2px 6px; }
+.drop-list { list-style: none; margin: 0; padding: 0; }
+.drop-item { width: 100%; display: grid; grid-template-columns: 76px 1fr auto; gap: 10px; align-items: center; text-align: left; background: none; border: none; border-top: 1px solid #edf1f6; padding: 10px 6px; font: inherit; color: inherit; cursor: pointer; border-radius: 8px; }
+.drop-item:hover, .drop-item:focus-visible { background: #f5f8fc; outline: 2px solid var(--brand-blue); outline-offset: -2px; }
+.drop-ticket { font-weight: 800; color: var(--navy); font-size: .9rem; }
+.drop-main small, .drop-side small { display: block; color: var(--muted); font-size: .78rem; margin-top: 2px; }
+.drop-main .status-badge { font-size: .7rem; padding: 2px 8px; }
+.drop-side { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.drop-side em { color: #b0213a; font-style: normal; font-weight: 600; font-size: .82rem; }
+.drop-all { width: 100%; margin-top: 8px; background: var(--brand-orange); color: #fff; border: none; border-radius: 9px; padding: 11px; font-weight: 700; cursor: pointer; font-size: .92rem; }
+.drop-all:hover { background: var(--brand-orange-dark); }
+.drop-empty { color: var(--muted); margin: 6px 0; font-size: .88rem; }
+@media (max-width: 600px) {
+  .drop-item { grid-template-columns: 1fr auto; }
+  .drop-ticket { grid-column: 1 / -1; }
+}
+
+/* ---------- Tarjetas y barras con vista rápida (v1.4.0) ---------- */
+button.kpi-card, button.compare-card { width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; position: relative; transition: border-color .15s, box-shadow .15s, transform .15s; }
+button.kpi-card:hover, button.compare-card:hover { border-color: var(--brand-orange); box-shadow: 0 4px 14px rgba(11,11,12,.08); }
+button.kpi-card:focus-visible, button.compare-card:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: 2px; }
+button.kpi-card::after, button.compare-card::after { content: "▾"; position: absolute; top: 12px; right: 12px; color: #b3bcc6; font-size: .8rem; transition: transform .15s; }
+button.kpi-card.is-open, button.compare-card.is-open { border-color: var(--brand-orange); box-shadow: 0 0 0 2px rgba(240,82,40,.15); }
+button.kpi-card.is-open::after, button.compare-card.is-open::after, .money-card.is-open::after { transform: rotate(180deg); color: var(--brand-orange); }
+.bar-row.is-open { background: #fff1ec; outline: 2px solid var(--brand-orange); outline-offset: 1px; }
+.peekable-row { cursor: pointer; }
+.peekable-row.is-open td { background: #fff1ec; }
+.peekable-row:focus-visible { outline: 2px solid var(--brand-blue); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) { .peek { animation: none; } }
+.backup-line { margin: 6px 0 0; font-size: .8rem; color: #157a42; font-weight: 600; }
+.backup-line.warn { color: #b0213a; }

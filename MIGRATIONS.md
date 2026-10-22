@@ -12,6 +12,8 @@ Automática al iniciar `backend/server.js`. Solo **agrega** columnas; no cambia 
 
 Las fechas de garantía se calculan con el evento real de `Entregado` del historial, así que las órdenes ya entregadas antes de esta versión también muestran su garantía.
 
+**Limpieza de historial duplicado (única operación que borra filas):** al arrancar se eliminan de `order_events` las filas importadas desde `audit_log` (`source_audit_id` no nulo) que duplican exactamente un evento ya registrado por la app (misma orden, estados y segundo). Se conserva el original, que sí tiene el técnico. `audit_log` no se toca. Antes de esto se hace un respaldo automático al arrancar.
+
 **Zona horaria:** desde v1.4.0 el servidor usa `America/New_York` (o la variable `TZ`). Las órdenes creadas antes con hora UTC conservan su hora guardada (aparecen 4–5 h adelantadas); no se reescriben para no alterar datos.
 
 **Reversión:** volver al código anterior funciona con la base migrada (ignora las columnas nuevas).

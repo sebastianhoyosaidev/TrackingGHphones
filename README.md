@@ -127,6 +127,14 @@ Consulta [MIGRATIONS.md](MIGRATIONS.md) antes del primer inicio con una base de 
 
 ## Backups
 
+**Automatic (v1.4.0):** the server backs up the database by itself, verified (`quick_check`), into `backend/backups/<db>-auto-YYYYMMDD-HHMMSS-mmm.db`:
+after each saved change (waits 1 min of quiet, max 10 min), on start (before migrations) and on shutdown (SIGTERM/SIGINT).
+It keeps the 48 newest plus one per day for 30 days. `AUTO_BACKUP=0` disables it; `BACKUP_DIR` changes the folder.
+The dashboard shows "Último respaldo automático". **These copies live on the same server**: also copy the folder
+off the server (e.g. a daily `rclone` to Google Drive or Oracle Object Storage) to survive losing the machine.
+
+**Manual:**
+
 ```bash
 cd backend
 npm run backup
@@ -162,6 +170,7 @@ WAL sidecar files (`repairshop.db-wal`, `repairshop.db-shm`) are recreated autom
 | GET    | `/api/orders/:id/history` | Status and technician assignment events |
 | POST   | `/api/orders/:id/warranty`| Open a warranty claim for a delivered order (`problems`, `diagnostic_note`, `cause`: `fabrica`/`cliente`, `agreement`, optional `arrival_condition`, `assigned_technician`, `promised_at`, `price`) |
 | GET    | `/api/insights`           | Customers, marketing segments, parts/stock and money pipeline (`from`, `to`) |
+| GET    | `/api/backup-status`      | Automatic backup status (enabled, last file/time, last error, pending) |
 | GET    | `/api/customers/lookup`   | Returning-customer lookup by phone (`phone`): visits, open orders, orders in warranty |
 
 ## Notes

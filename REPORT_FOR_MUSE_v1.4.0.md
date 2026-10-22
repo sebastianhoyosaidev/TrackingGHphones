@@ -31,7 +31,9 @@ cd backend && npm ci && cd ..
 #    or stop the running `npm start` / `node start.js` and start it again
 ```
 
-The database migration runs **automatically** on start and is additive (adds columns only). No env changes are required; optional ones are in §5.
+The database migration runs **automatically** on start: it adds columns, and it removes the duplicated status-history rows described in §3.7 (an automatic verified backup is taken first). No env changes are required; optional ones are in §5.
+
+**Demo DB after this deploy:** restart it as usual (the duplicate cleanup runs on it too), or regenerate it cleanly with `node --env-file=.env seed-demo.js --reset` before restarting.
 
 When the owner approves, merge the branch into `main` on GitHub (PR "Compare & pull request" → Merge) and switch the server back to `main` with `git checkout main && git pull`.
 
@@ -139,7 +141,25 @@ Current period vs. the previous period of the same length.
 
 Simulated-shop results that drove these changes (1,418 orders): phone search in another format returned 0 of 3; "Carmen Diaz" returned 0 (stored "Díaz"); a returning customer with an active warranty could be charged as a new paid order with no warning; 77 devices "Listo" for 30+ days with no reminder list; `/api/orders` returned 1 MB per load. All fixed and re-verified.
 
-### 3.7 Files
+### 3.7 Round 3 — data integrity, live multi-device, auto backups, quick views
+
+**IMPORTANT bug fix (pre-existing since v1.3.0): duplicated status history.** `logStatusChange` wrote `audit_log` + `order_events` without linking them, and the startup step re-imported *all* of `audit_log` into `order_events` every boot (only skipping rows with the same `source_audit_id`). So every status change made in the app was duplicated (without technician) after the next restart. This inflated "Entregadas hoy", delivered-per-technician ("Sin asignar"), and turnaround. The current demo DB on the server has ~4,087 duplicates because it was started after seeding.
+Fix: (1) `logStatusChange` now passes the audit id as `source_audit_id`; (2) startup import only adds audit rows with no matching event; (3) startup **deletes** imported rows that exactly duplicate an app-recorded event (same order, from/to, timestamp), keeping the original with technician. `audit_log` untouched. Verified: 4,087 → 0, stays 0 after 3 restarts.
+
+**Repair time was not accurate.** It measured received → *delivered*, so pickup waiting counted as repair (simulation: 90.7 h vs real 46.4 h). Now `turnaround.medianHours` = received → first `Listo`; new `turnaround.medianPickupHours` = `Listo` → `Entregado`. Cross-checked with an independent SQL query: identical (250 deliveries, 46.4 h / 44.6 h).
+
+Other pre-existing bugs fixed: aging buckets `2_3`/`4_7` had inverted bounds (always empty); "Entregadas por técnico" bars showed the *pending* count.
+
+**Multi-device safety ("everything really online").** All writes already go straight to SQLite on the server; nothing is stored on the device. Added:
+- `PUT /api/orders/:id` accepts `expected_updated_at`; if the row changed since the form opened → 409, nothing overwritten.
+- `POST /api/orders/:id/advance` accepts `{from}`; if the status already changed on another device → 409 (prevents a double advance to Entregado).
+- Client auto-refresh: Órdenes and Panel every 30 s while visible and on `visibilitychange`; skipped while a modal, quick view, history or search input is active. Silent dashboard refresh (no flicker).
+
+**Automatic backups inside the app.** Verified `VACUUM INTO backups/<db>-auto-<stamp>.db` (`quick_check` + table read; bad copy is deleted and logged): on start (before migrations, if the DB existed), after each successful non-GET `/api/orders*` (debounced 1 min, max wait 10 min), and on SIGTERM/SIGINT if a change is pending. Retention: 48 newest + newest per day for 30 days. `GET /api/backup-status` (auth) feeds a "Último respaldo automático" line in the panel. Env: `AUTO_BACKUP=0`, `BACKUP_DIR`. **Still needed from you: an off-server copy** (e.g. daily `rclone copy backend/backups remote:geeks-backups`) — same-disk copies don't survive losing the VM. This replaces the backup-frequency question: no cron needed for local copies.
+
+**Quick views everywhere.** Clicking any money card, comparison card, KPI card, chart bar or customer row opens an inline list of the 6 most recent matching orders (click → that order; "Ver todas (N)" → filtered list). One open at a time, Esc closes. Results cached per filter set until the dashboard reloads; stale responses ignored. New exact filters so lists match cards: `aging_bucket=3_plus`, `pickup_bucket=over_48`, `warranty_only=1`. Verified 56/56 lists match their card/bar numbers. Removed "Órdenes creadas por período" chart and the "Agrupar por" filter (owner request).
+
+### 3.8 Files
 | File | Change |
 |---|---|
 | `backend/server.js` | TZ, migrations, warranty helpers + endpoint, price/opt-in, `/api/insights` |
@@ -171,6 +191,8 @@ Each `ALTER` runs only if the column is missing (checked with `PRAGMA table_info
 | Var | Default | Meaning |
 |---|---|---|
 | `TZ` | `America/New_York` | Shop timezone |
+| `AUTO_BACKUP` | on | `0` disables automatic backups |
+| `BACKUP_DIR` | `backend/backups` | Where automatic backups go |
 | `DB_FILE` | `repairshop.db` | SQLite file (e.g. `demo.db` for the simulated shop) |
 | `WARRANTY_DAYS` | `60` | Warranty length in days |
 
@@ -179,6 +201,7 @@ Each `ALTER` runs only if the column is missing (checked with `PRAGMA table_info
 ## 6. How it was tested (in Claude's sandbox)
 - **37 end-to-end API checks** on a real server instance and real SQLite DB: price/opt-in validation, local time, warranty Cubierta / No cubierta / Vencida (delivery moved 70 days back), duplicate-claim and not-delivered refusals, field injection ignored, history, public lookup, edit preserving fields, insights numbers (revenue, open money, customer merge across phone formats, segments, parts demand, warranty return rate, model merge), auth required on new endpoints. **All passed.**
 - **Migration test:** DB created and populated by the v1.3.0 `server.js` from `main`, then started with v1.4.0: old order readable, warranty date computed from its real delivery, claim opened, insights OK, clean log.
+- **Round 3:** duplicate repair (inject v1.3.0 duplicates → 0 after start, 0 after 3 restarts; delivered-unassigned events = orders, 225 = 225); two-device conflicts (stale edit → 409, stale advance → 409, nothing lost); backups (startup, per change, on SIGTERM with the latest change inside, pruning to 30 days); 56/56 quick-view totals equal card numbers; turnaround equal to an independent SQL computation.
 - **Simulated shop:** 1,418 orders / 180 days; scenario script (repeat customer by phone formats, accents, active-warranty detection, paging, pickup list, insights sanity, auth on the new endpoint). All endpoints < 210 ms on that dataset.
 - **Visual test** with headless Chromium at 1280 px and 390 px (phone): every new screen, no console/CSP errors.
 - Limitation: the sandbox could not reach the npm registry, so tests ran against a minimal Express-compatible test double (routing, JSON, static). `express` itself and `package-lock.json` are unchanged from v1.3.0. Please confirm the app starts normally after `npm ci` on the server.
