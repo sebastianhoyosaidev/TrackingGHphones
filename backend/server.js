@@ -2,6 +2,13 @@
 // Simple Express + SQLite backend. No build step: `node server.js`.
 // Uses Node's built-in node:sqlite (Node 22.5+), so there are no native
 // dependencies to compile.
+
+// Zona horaria del taller (Hollywood, FL). Las fechas se guardan con
+// datetime('now', 'localtime'), que depende de la zona del servidor; en la
+// nube suele ser UTC y las horas salían 4–5 h adelantadas. Se puede cambiar
+// con la variable de entorno TZ. Debe ir antes de cualquier uso de fechas.
+process.env.TZ = process.env.TZ || 'America/New_York';
+
 const express = require('express');
 const path = require('path');
 const crypto = require('node:crypto');
