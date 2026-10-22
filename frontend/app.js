@@ -94,7 +94,7 @@ const NEXT_LABEL = {
 const TECHNICIANS = ['Fabio', 'Oliver', 'Sebastian', 'Fernando', 'Maria', 'Elder'];
 
 function fillTechnicianOptions() {
-  for (const id of ['f-technician', 'e-technician', 'dash-technician', 'orders-technician']) {
+  for (const id of ['f-technician', 'e-technician', 'w-technician', 'dash-technician', 'orders-technician']) {
     const select = document.getElementById(id);
     if (!select) continue;
     const first = select.options[0];
@@ -250,6 +250,8 @@ document.getElementById('intake-form').addEventListener('submit', async (e) => {
     received_by: document.getElementById('f-received-by').value,
     assigned_technician: document.getElementById('f-technician').value,
     promised_at: document.getElementById('f-promised-at').value,
+    price: document.getElementById('f-price').value,
+    marketing_opt_in: document.getElementById('f-optin').checked,
     agreement: document.getElementById('f-agreement').value,
     diagnostic_note: document.getElementById('f-diagnostic').value
   };
@@ -259,9 +261,10 @@ document.getElementById('intake-form').addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
+    if (r.status === 401) return sessionExpired();
     const data = await r.json();
     if (!r.ok) {
-      err.textContent = (data.errors || ['Error al guardar.']).join(' ');
+      err.textContent = (data.errors || [data.error || 'Error al guardar.']).join(' ');
       err.classList.remove('hidden');
       focusFirstInvalid('f');
       return;
@@ -327,6 +330,7 @@ async function loadOrders() {
   list.innerHTML = '<p class="empty">Cargando órdenes…</p>';
   try {
     const response = await api('/api/orders?' + q);
+    if (response.status === 401) return sessionExpired();
     if (!response.ok) throw new Error('No se pudieron cargar las órdenes.');
     const orders = await response.json();
     if (!orders.length) {
@@ -347,26 +351,32 @@ async function loadOrders() {
         <p class="order-meta">${esc(o.device_type)} · ${esc(o.model)}${o.phone ? ' · ' + esc(o.phone) : ''}</p>
         <div class="order-problems">${o.problems.map(p => `<span class="tag">${esc(p)}</span>`).join('')}</div>
         ${o.diagnostic_note ? `<p class="order-meta"><strong>Cliente dice:</strong> ${esc(o.diagnostic_note)}</p>` : ''}
+        ${o.price !== null && o.price !== undefined ? `<p class="order-meta"><strong>Precio:</strong> ${esc(money(o.price))}</p>` : ''}
         <p class="order-meta"><strong>Técnico:</strong> ${o.assigned_technician ? esc(o.assigned_technician) : 'Sin asignar'}${o.promised_at ? ` · <strong>Prometida:</strong> ${esc(o.promised_at)}` : ''}</p>
         <p class="order-meta"><span class="received-by">Recibió: ${esc(o.received_by)}</span> · ${esc(o.created_at.slice(0, 16).replace('T', ' '))}</p>
         ${o.status_changed_at ? `<p class="order-meta">${esc(o.status)} desde ${esc(o.status_changed_at.slice(0, 16))}</p>` : ''}
+        ${warrantyClaimLine(o)}
+        ${warrantyStatusLine(o)}
         <div class="order-actions">
-          ${canAdvance ? `<button class="btn-advance" data-id="${o.id}">${esc(NEXT_LABEL[o.status])}</button>` : ''}
+          ${canAdvance ? `<button class="btn-advance" data-id="${o.id}" data-status="${esc(o.status)}">${esc(NEXT_LABEL[o.status])}</button>` : ''}
           <button class="btn-history" type="button" data-id="${o.id}" aria-expanded="false">Historial</button>
           <button class="btn-edit" data-id="${o.id}">Editar</button>
+          ${o.status === 'Entregado' ? `<button class="btn-warranty" type="button" data-id="${o.id}">Garantía / Devolución</button>` : ''}
           ${o.status === 'Recibido' ? `<button class="btn-delete" data-id="${o.id}">Eliminar</button>` : ''}
         </div>
         <div class="order-history hidden" id="order-history-${o.id}" aria-live="polite"></div>`;
       list.appendChild(card);
     });
     list.querySelectorAll('.btn-advance').forEach(b =>
-      b.addEventListener('click', () => advanceOrder(b.dataset.id)));
+      b.addEventListener('click', () => advanceOrder(b.dataset.id, b.dataset.status)));
     list.querySelectorAll('.btn-edit').forEach(b =>
       b.addEventListener('click', () => openEdit(b.dataset.id)));
     list.querySelectorAll('.btn-history').forEach(b =>
       b.addEventListener('click', () => toggleOrderHistory(b)));
     list.querySelectorAll('.btn-delete').forEach(b =>
       b.addEventListener('click', () => deleteOrder(b.dataset.id)));
+    list.querySelectorAll('.btn-warranty').forEach(b =>
+      b.addEventListener('click', () => openWarranty(b.dataset.id)));
   } catch {
     list.innerHTML = '<p class="empty">No se pudo cargar. Revisa la conexión.</p>';
   }
@@ -392,6 +402,8 @@ async function toggleOrderHistory(button) {
         message = event.assigned_technician
           ? `Técnico asignado: ${esc(event.previous_technician || 'Sin asignar')} → ${esc(event.assigned_technician)}`
           : `Asignación retirada: ${esc(event.previous_technician || 'Sin asignar')}`;
+      } else if (event.details) {
+        message = esc(event.details);
       } else message = 'Actualización de orden';
       return `<p class="history-event"><strong>${message}</strong><span>${at} · ${esc(event.actor || 'sistema')}</span></p>`;
     }).join('') || '<p class="muted">Sin eventos registrados.</p>';
@@ -401,9 +413,28 @@ async function toggleOrderHistory(button) {
   }
 }
 
-async function advanceOrder(id) {
-  await api('/api/orders/' + id + '/advance', { method: 'POST' });
+async function advanceOrder(id, currentStatus) {
+  // "Entregado" no se puede deshacer: se pide confirmación.
+  if (currentStatus === 'Listo' &&
+      !confirm('¿Marcar como ENTREGADO? Esto no se puede deshacer.\nDesde hoy empiezan a contar los días de garantía.')) return;
+  try {
+    const r = await api('/api/orders/' + id + '/advance', { method: 'POST' });
+    if (r.status === 401) return sessionExpired();
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(data.error || 'No se pudo cambiar el estado.');
+    }
+  } catch {
+    alert('No se pudo conectar con el servidor.');
+  }
   loadOrders();
+}
+
+// La sesión dura 12 h. Si caduca, se avisa y se vuelve al login (lo escrito
+// en el formulario de Nueva orden sigue ahí al volver a entrar).
+function sessionExpired() {
+  alert('Tu sesión expiró. Inicia sesión otra vez para continuar.');
+  showLogin();
 }
 
 async function deleteOrder(id) {
@@ -421,6 +452,10 @@ async function deleteOrder(id) {
   }
 }
 
+function money(v) {
+  return '$' + Number(v || 0).toLocaleString('es-US', { maximumFractionDigits: 2 });
+}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -436,6 +471,7 @@ let editingId = null;
 async function openEdit(id) {
   // B-2: trae solo la orden a editar, no toda la lista.
   const r = await api('/api/orders/' + encodeURIComponent(id));
+  if (r.status === 401) return sessionExpired();
   if (!r.ok) return;
   const o = await r.json();
   if (!o || !o.id) return;
@@ -449,6 +485,8 @@ async function openEdit(id) {
   document.getElementById('e-technician').value = o.assigned_technician || '';
   document.getElementById('e-promised-at').value = o.promised_at || '';
   document.getElementById('e-agreement').value = o.agreement;
+  document.getElementById('e-price').value = o.price ?? '';
+  document.getElementById('e-optin').checked = o.marketing_opt_in === 1;
   document.getElementById('e-diagnostic').value = o.diagnostic_note || '';
   document.getElementById('e-status').value = o.status;
   setSelected('e-device-type', [o.device_type]);
@@ -481,6 +519,8 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
     received_by: document.getElementById('e-received-by').value,
     assigned_technician: document.getElementById('e-technician').value,
     promised_at: document.getElementById('e-promised-at').value,
+    price: document.getElementById('e-price').value,
+    marketing_opt_in: document.getElementById('e-optin').checked,
     agreement: document.getElementById('e-agreement').value,
     diagnostic_note: document.getElementById('e-diagnostic').value,
     status: document.getElementById('e-status').value
@@ -491,9 +531,10 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
+    if (r.status === 401) { document.getElementById('edit-modal').classList.add('hidden'); return sessionExpired(); }
     const data = await r.json();
     if (!r.ok) {
-      err.textContent = (data.errors || ['Error al guardar.']).join(' ');
+      err.textContent = (data.errors || [data.error || 'Error al guardar.']).join(' ');
       err.classList.remove('hidden');
       focusFirstInvalid('e');
       return;
@@ -530,6 +571,8 @@ async function doLookup() {
       <p><strong>Cliente:</strong> ${esc(o.customer_name)}</p>
       <p><strong>Equipo:</strong> ${esc(o.device_type)} ${esc(o.model)}</p>
       <p><strong>Problemas:</strong> ${o.problems.map(esc).join(', ')}</p>
+      ${o.warranty_result ? `<p><strong>Garantía:</strong> ${esc(o.warranty_result)}</p>` : ''}
+      ${o.warranty_until ? `<p><strong>Garantía hasta:</strong> ${esc(o.warranty_until)}</p>` : ''}
       <p class="muted">Geeks Hollywood · 4514 Hollywood Blvd · (754) 888-9631</p>`;
     box.classList.remove('hidden');
   } catch {
@@ -542,10 +585,49 @@ document.getElementById('lookup-ticket').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') doLookup();
 });
 
-// ---------- Panel operativo ----------
+// ---------- Panel operativo (v1.4.0) ----------
+// Fluido: filtros se aplican solos, el contenido anterior se mantiene visible
+// mientras carga y se ignoran respuestas viejas si el usuario cambia rápido.
+let dashboardSeq = 0;
+let dashboardTimer = null;
+let insightsData = null;
+function scheduleDashboard() {
+  clearTimeout(dashboardTimer);
+  dashboardTimer = setTimeout(loadDashboard, 250);
+}
 document.getElementById('dashboard-filters').addEventListener('submit', e => {
   e.preventDefault();
   loadDashboard();
+});
+for (const id of ['dash-status', 'dash-technician', 'dash-device', 'dash-interval']) {
+  document.getElementById(id).addEventListener('change', scheduleDashboard);
+}
+for (const id of ['dash-from', 'dash-to']) {
+  document.getElementById(id).addEventListener('change', () => {
+    document.querySelectorAll('#dash-ranges .range-chip').forEach(b => b.classList.remove('active'));
+    scheduleDashboard();
+  });
+}
+document.querySelectorAll('#dash-ranges .range-chip').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const today = new Date();
+    let from = new Date(today);
+    const r = btn.dataset.range;
+    if (r === 'month') from = new Date(today.getFullYear(), today.getMonth(), 1);
+    else if (r === 'year') from = new Date(today.getFullYear(), 0, 1);
+    else if (r !== 'today') from.setDate(today.getDate() - (Number(r) - 1));
+    document.getElementById('dash-from').value = localDateInput(from);
+    document.getElementById('dash-to').value = localDateInput(today);
+    document.getElementById('dash-interval').value = (r === '90' || r === 'year') ? (r === 'year' ? 'month' : 'week') : 'day';
+    document.querySelectorAll('#dash-ranges .range-chip').forEach(b => b.classList.toggle('active', b === btn));
+    loadDashboard();
+  });
+});
+document.querySelectorAll('#dash-subtabs .subtab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#dash-subtabs .subtab').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.dash-pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + btn.dataset.pane));
+  });
 });
 
 function dashboardQuery() {
@@ -570,22 +652,37 @@ function updateDeviceOptions(deviceTypes) {
 }
 
 async function loadDashboard() {
+  const seq = ++dashboardSeq;
   const state = document.getElementById('dashboard-state');
   const content = document.getElementById('dashboard-content');
-  state.textContent = 'Cargando datos del taller…';
+  const firstLoad = content.classList.contains('hidden');
+  state.textContent = firstLoad ? 'Cargando datos del taller…' : 'Actualizando…';
   state.classList.remove('error');
-  content.classList.add('hidden');
+  content.classList.add('is-loading');
   try {
-    const response = await api('/api/dashboard?' + dashboardQuery());
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'No se pudo cargar el panel.');
+    const range = new URLSearchParams({ from: document.getElementById('dash-from').value, to: document.getElementById('dash-to').value });
+    const [dashRes, insRes] = await Promise.all([
+      api('/api/dashboard?' + dashboardQuery()),
+      api('/api/insights?' + range)
+    ]);
+    if (seq !== dashboardSeq) return; // llegó una respuesta vieja: se ignora
+    if (dashRes.status === 401 || insRes.status === 401) return sessionExpired();
+    const data = await dashRes.json();
+    const insights = await insRes.json();
+    if (!dashRes.ok) throw new Error(data.error || 'No se pudo cargar el panel.');
+    if (!insRes.ok) throw new Error(insights.error || 'No se pudo cargar el panel.');
     updateDeviceOptions(data.deviceTypes || []);
     renderDashboard(data);
+    insightsData = insights;
+    renderInsights(insights);
     content.classList.remove('hidden');
     state.textContent = data.created.length ? '' : 'No hay órdenes en el período seleccionado.';
   } catch (error) {
+    if (seq !== dashboardSeq) return;
     state.textContent = error.message || 'No se pudo cargar el panel. Revisa la conexión.';
     state.classList.add('error');
+  } finally {
+    if (seq === dashboardSeq) content.classList.remove('is-loading');
   }
 }
 
@@ -722,18 +819,12 @@ document.getElementById('dashboard-export').addEventListener('click', async () =
     const columns = [
       ['Ticket', 'ticket'], ['Cliente', 'customer_name'], ['Teléfono', 'phone'], ['Equipo', 'device_type'],
       ['Modelo', 'model'], ['Problemas', o => o.problems.join('; ')], ['Estado', 'status'],
-      ['Técnico asignado', 'assigned_technician'], ['Recibió', 'received_by'], ['Fecha de ingreso', 'created_at'],
-      ['Fecha prometida', 'promised_at'], ['Último cambio de estado', 'status_changed_at']
+      ['Técnico asignado', 'assigned_technician'], ['Precio', 'price'], ['Acepta promociones', o => o.marketing_opt_in === 1 ? 'Sí' : 'No'], ['Recibió', 'received_by'], ['Fecha de ingreso', 'created_at'],
+      ['Fecha prometida', 'promised_at'], ['Último cambio de estado', 'status_changed_at'],
+      ['Garantía', o => o.warranty_of_ticket ? `De ${o.warranty_of_ticket}: ${o.warranty_result || ''}`
+        : (o.warranty_until ? `Hasta ${o.warranty_until}` : '')]
     ];
-    const csvCell = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    const csv = '\uFEFF' + [columns.map(([label]) => csvCell(label)).join(','), ...orders.map(order =>
-      columns.map(([, key]) => csvCell(typeof key === 'function' ? key(order) : order[key])).join(','))].join('\r\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `reporte-ordenes-${localDateInput(new Date())}.csv`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    csvDownload(`reporte-ordenes-${localDateInput(new Date())}.csv`, columns, orders);
   } catch (error) {
     alert(error.message || 'No se pudo generar el reporte.');
   } finally {
@@ -741,3 +832,305 @@ document.getElementById('dashboard-export').addEventListener('click', async () =
     button.textContent = original;
   }
 });
+
+// ---------- Garantía / Devolución (v1.4.0) ----------
+// El servidor decide el resultado; aquí solo se muestra una vista previa.
+const WARRANTY_CAUSES = {
+  'Falla de fábrica / de la reparación': 'fabrica',
+  'Daño del cliente (partido, golpe, mojado…)': 'cliente'
+};
+// Señales en "¿Cómo llegó?" que suelen indicar daño del cliente.
+const DAMAGE_SIGNS = ['Mojado', 'Backglass partido', 'Golpes visibles'];
+
+function warrantyClaimLine(o) {
+  if (!o.warranty_of_ticket) return '';
+  const cls = { 'Cubierta': 'covered', 'No cubierta': 'not-covered', 'Vencida': 'expired' }[o.warranty_result] || 'expired';
+  return `<p class="warranty-claim ${cls}">↩ Garantía de ${esc(o.warranty_of_ticket)} · <strong>${esc(o.warranty_result || '')}</strong>${o.warranty_reason ? ` · ${esc(o.warranty_reason)}` : ''}</p>`;
+}
+
+function warrantyStatusLine(o) {
+  if (o.status !== 'Entregado' || !o.warranty_until) return '';
+  if (o.warranty_active) {
+    const days = o.warranty_days_left === 0 ? 'último día' : `quedan ${o.warranty_days_left} días`;
+    return `<p class="warranty-line ok">🛡 Garantía hasta ${esc(o.warranty_until)} · ${esc(days)}</p>`;
+  }
+  return `<p class="warranty-line expired">Garantía vencida el ${esc(o.warranty_until)}</p>`;
+}
+
+buildChips('w-problems', PROBLEMS, { multi: true });
+buildChips('w-arrival', ARRIVAL, { multi: true, onChange: updateWarrantyPreview });
+buildChips('w-cause', Object.keys(WARRANTY_CAUSES), { onChange: updateWarrantyPreview });
+
+let warrantyOrder = null;
+async function openWarranty(id) {
+  const r = await api('/api/orders/' + encodeURIComponent(id));
+  if (r.status === 401) return sessionExpired();
+  if (!r.ok) return alert('No se pudo abrir la orden.');
+  const o = await r.json();
+  warrantyOrder = o;
+  document.getElementById('w-ticket').textContent = o.ticket;
+  const info = document.getElementById('w-info');
+  info.innerHTML = `
+    <p><strong>${esc(o.customer_name)}</strong> · ${esc(o.device_type)} · ${esc(o.model)}${o.phone ? ' · ' + esc(o.phone) : ''}</p>
+    <p>Se reparó: ${o.problems.map(esc).join(', ')}</p>
+    <p>Entregado: ${esc((o.delivered_at || '').slice(0, 10) || '—')}</p>
+    ${warrantyStatusLine(o)}`;
+  document.getElementById('warranty-form').reset();
+  ['w-problems', 'w-arrival', 'w-cause'].forEach(cid => setSelected(cid, []));
+  document.getElementById('w-error').classList.add('hidden');
+  document.getElementById('warranty-form').classList.remove('hidden');
+  document.getElementById('w-success').classList.add('hidden');
+  updateWarrantyPreview();
+  document.getElementById('warranty-modal').classList.remove('hidden');
+}
+
+function updateWarrantyPreview() {
+  const out = document.getElementById('w-result');
+  const warn = document.getElementById('w-damage-warning');
+  const causeLabel = getSelected('w-cause')[0];
+  const cause = WARRANTY_CAUSES[causeLabel];
+  const signs = getSelected('w-arrival').filter(x => DAMAGE_SIGNS.includes(x));
+  warn.classList.toggle('hidden', !(cause === 'fabrica' && signs.length));
+  warn.textContent = `Ojo: marcaste ${signs.join(', ')}. Revisa bien si de verdad es falla de fábrica.`;
+  out.className = 'warranty-result';
+  if (warrantyOrder && warrantyOrder.warranty_active === false) {
+    out.classList.add('expired');
+    out.textContent = 'Garantía VENCIDA (pasaron más de 60 días). Se cobra como reparación normal.';
+  } else if (cause === 'cliente') {
+    out.classList.add('not-covered');
+    out.textContent = 'NO CUBIERTA: es daño del cliente. Se cobra como reparación normal.';
+  } else if (cause === 'fabrica') {
+    out.classList.add('covered');
+    out.textContent = 'CUBIERTA por garantía: sin costo para el cliente.';
+  } else {
+    out.textContent = 'Elige qué lo causó para ver si cubre la garantía.';
+  }
+}
+
+document.getElementById('warranty-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('w-error');
+  err.classList.add('hidden');
+  const body = {
+    problems: getSelected('w-problems'),
+    arrival_condition: getSelected('w-arrival'),
+    diagnostic_note: document.getElementById('w-diagnostic').value,
+    cause: WARRANTY_CAUSES[getSelected('w-cause')[0]] || '',
+    assigned_technician: document.getElementById('w-technician').value,
+    promised_at: document.getElementById('w-promised-at').value,
+    price: document.getElementById('w-price').value,
+    agreement: document.getElementById('w-agreement').value
+  };
+  try {
+    const r = await api('/api/orders/' + warrantyOrder.id + '/warranty', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (r.status === 401) { document.getElementById('warranty-modal').classList.add('hidden'); return sessionExpired(); }
+    const data = await r.json();
+    if (!r.ok) {
+      err.textContent = data.errors ? data.errors.join(' ') : (data.error || 'Error al guardar.');
+      err.classList.remove('hidden');
+      return;
+    }
+    document.getElementById('warranty-form').classList.add('hidden');
+    document.getElementById('w-success-label').textContent = `¡Garantía abierta! Resultado: ${data.warranty_result}`;
+    document.getElementById('w-ticket-big').textContent = data.ticket;
+    document.getElementById('w-code-big').textContent = data.customer_code || '—';
+    document.getElementById('w-success').classList.remove('hidden');
+  } catch {
+    err.textContent = 'No se pudo conectar con el servidor.';
+    err.classList.remove('hidden');
+  }
+});
+
+function closeWarranty() {
+  document.getElementById('warranty-modal').classList.add('hidden');
+  loadOrders();
+}
+document.getElementById('btn-warranty-cancel').addEventListener('click', () =>
+  document.getElementById('warranty-modal').classList.add('hidden'));
+document.getElementById('btn-warranty-close').addEventListener('click', closeWarranty);
+document.getElementById('warranty-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'warranty-modal') e.target.classList.add('hidden');
+});
+
+// ---------- Insights: clientes, marketing, repuestos (v1.4.0) ----------
+function csvDownload(filename, columns, rows) {
+  // Evita que Excel ejecute fórmulas escritas en los datos (= + - @).
+  const cell = value => {
+    let text = String(value ?? '');
+    if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+    return `"${text.replace(/"/g, '""')}"`;
+  };
+  const csv = '﻿' + [columns.map(([label]) => cell(label)).join(','),
+    ...rows.map(r => columns.map(([, key]) => cell(typeof key === 'function' ? key(r) : r[key])).join(','))].join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function changeBadge(change, { inverse = false } = {}) {
+  if (change === null) return '<span class="delta up">nuevo</span>';
+  if (!change) return '<span class="delta flat">= igual</span>';
+  const good = inverse ? change < 0 : change > 0;
+  return `<span class="delta ${good ? 'up' : 'down'}">${change > 0 ? '▲' : '▼'} ${Math.abs(change)}%</span>`;
+}
+
+function fmtDate(d) {
+  if (!d) return '—';
+  const [y, m, day] = d.slice(0, 10).split('-').map(Number);
+  return new Date(y, m - 1, day).toLocaleDateString('es-US', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function renderInsights(ins) {
+  const p = ins.period;
+  document.getElementById('dash-period-label').textContent =
+    `${fmtDate(p.from)} – ${fmtDate(p.to)} (${p.days} ${p.days === 1 ? 'día' : 'días'}) · comparado con ${fmtDate(p.prevFrom)} – ${fmtDate(p.prevTo)}`;
+
+  // Resumen comparado
+  const s = ins.summary;
+  const plain = v => String(v);
+  const cards = [
+    ['Órdenes recibidas', s.orders, plain],
+    ['Entregadas', s.delivered, plain],
+    ['Cobrado (entregadas)', s.revenue, money],
+    ['Ticket promedio', s.avgTicket, money],
+    ['Garantías del período', s.warrantyClaims, plain, true,
+      s.warrantyClaims.value ? `${s.warrantyCovered} cubiertas por el taller` : ''],
+  ];
+  document.getElementById('dash-compare').innerHTML = cards.map(([label, m, fmt, inverse, extra = '']) => `
+    <div class="compare-card"><span class="kpi-label">${esc(label)}</span>
+      <strong class="kpi-value">${esc(fmt(m.value))}</strong>${extra ? `<span class="compare-extra">${esc(extra)}</span>` : ''}
+      <span class="compare-prev">${changeBadge(m.change, { inverse: !!inverse })} <small>antes: ${esc(fmt(m.previous))}</small></span>
+    </div>`).join('') + (s.pricedShare !== null && s.pricedShare < 100
+      ? `<p class="compare-note">Solo ${s.pricedShare}% de las órdenes entregadas tienen precio anotado. Para ingresos exactos, llena "Precio acordado" al recibir cada equipo.</p>` : '');
+
+  renderMoney(ins.pipeline);
+  renderCustomers(ins.customers);
+  renderSegments(ins.segments);
+  renderStock(ins.stock);
+}
+
+function renderMoney(pl) {
+  const box = (label, m, cls, filter) => `
+    <button type="button" class="money-card ${cls}" data-status="${esc(filter)}">
+      <span class="kpi-label">${esc(label)}</span>
+      <strong class="money-value">${esc(money(m.value))}</strong>
+      <span class="money-sub">${m.count} ${m.count === 1 ? 'orden' : 'órdenes'}${m.withoutPrice ? ` · <em>${m.withoutPrice} sin precio</em>` : ''}</span>
+    </button>`;
+  document.getElementById('dash-money').innerHTML =
+    box('Total abierto', pl.open, 'money-total', '') +
+    box('Recibido (sin empezar)', pl.received, '', 'Recibido') +
+    box('En reparación', pl.inRepair, '', 'En reparación') +
+    box('Listo para cobrar', pl.ready, 'money-ready', 'Listo');
+  document.querySelectorAll('#dash-money .money-card').forEach(b => b.addEventListener('click', () =>
+    openOrdersFromChart({ status: b.dataset.status, open_only: b.dataset.status ? '' : '1' })));
+  const notes = [`Cobrado hoy: ${money(pl.collectedToday)}.`];
+  if (pl.readyWaiting48h.count) notes.push(`${money(pl.readyWaiting48h.value)} en ${pl.readyWaiting48h.count} órdenes listas hace más de 48 h: llama a esos clientes.`);
+  if (pl.open.withoutPrice) notes.push(`${pl.open.withoutPrice} órdenes abiertas no tienen precio: edítalas para que el total sea exacto.`);
+  document.getElementById('dash-money-note').textContent = notes.join(' ');
+}
+
+function renderCustomers(c) {
+  const k = c.summary;
+  document.getElementById('cust-kpis').innerHTML = [
+    ['Clientes en el período', k.inPeriod, ''],
+    ['Clientes nuevos', k.new.value, changeBadge(k.new.change)],
+    ['Clientes que volvieron', `${k.returning} · ${k.returningRate}%`, ''],
+    ['Aceptan promociones', `${k.optedIn} de ${k.total}`, ''],
+  ].map(([label, value, extra]) => `<div class="kpi-card"><span class="kpi-label">${esc(label)}</span>
+      <strong class="kpi-value">${esc(value)}</strong>${extra ? `<span class="compare-prev">${extra}</span>` : ''}</div>`).join('')
+    + (k.noPhoneInPeriod ? `<p class="compare-note">${k.noPhoneInPeriod} órdenes del período no tienen teléfono: esos clientes no se pueden volver a contactar.</p>` : '');
+  drawCustomerTable();
+}
+
+function drawCustomerTable() {
+  if (!insightsData) return;
+  const q = document.getElementById('cust-search').value.trim().toLowerCase();
+  const digits = q.replace(/\D/g, '');
+  const list = insightsData.customers.all.filter(c => !q ||
+    c.name.toLowerCase().includes(q) || (digits && c.phone.replace(/\D/g, '').includes(digits)));
+  const shown = list.slice(0, q ? 50 : 15);
+  document.getElementById('cust-table').innerHTML = `
+    <thead><tr><th>Cliente</th><th>Teléfono</th><th class="num">Visitas</th><th class="num">Gastado</th><th>Última visita</th><th>Equipos</th><th>Promos</th></tr></thead>
+    <tbody>${shown.map(c => `<tr>
+      <td><strong>${esc(c.name)}</strong>${c.warrantyClaims ? ` <span class="pill pill-warn">${c.warrantyClaims} garantía${c.warrantyClaims > 1 ? 's' : ''}</span>` : ''}</td>
+      <td>${esc(c.phone || '—')}</td>
+      <td class="num">${c.visits}</td>
+      <td class="num">${c.spent ? esc(money(c.spent)) : '—'}</td>
+      <td>${esc(fmtDate(c.last))} <small class="muted">(${c.daysSinceLast} d)</small></td>
+      <td>${esc(c.models.join(', '))}</td>
+      <td>${c.optIn ? '<span class="pill pill-ok">Sí</span>' : '<span class="pill">No</span>'}</td>
+    </tr>`).join('') || '<tr><td colspan="7" class="muted">Sin clientes.</td></tr>'}</tbody>`
+    + (list.length > shown.length ? `<caption class="table-more">Mostrando ${shown.length} de ${list.length}. Busca o descarga el CSV para ver todos.</caption>` : '');
+}
+document.getElementById('cust-search').addEventListener('input', drawCustomerTable);
+document.getElementById('cust-export').addEventListener('click', () => {
+  if (!insightsData) return;
+  csvDownload(`clientes-${localDateInput(new Date())}.csv`, [
+    ['Nombre', 'name'], ['Teléfono', 'phone'], ['Visitas', 'visits'], ['Gastado', 'spent'],
+    ['Primera visita', 'first'], ['Última visita', 'last'], ['Equipos', c => c.models.join('; ')],
+    ['Garantías', 'warrantyClaims'], ['Acepta promociones', c => c.optIn ? 'Sí' : 'No']
+  ], insightsData.customers.all);
+});
+
+function renderSegments(segments) {
+  const box = document.getElementById('mkt-segments');
+  box.innerHTML = segments.map(sg => `
+    <section class="segment-card">
+      <h3>${esc(sg.title)}</h3>
+      <p class="segment-action">→ ${esc(sg.action)}</p>
+      <div class="segment-numbers">
+        <span><strong>${sg.total}</strong> clientes</span>
+        <span><strong>${sg.contactable}</strong> contactables</span>
+      </div>
+      <div class="segment-buttons">
+        <button type="button" class="btn-secondary btn-small" data-seg-view="${esc(sg.id)}" ${sg.contactable ? '' : 'disabled'}>Ver lista</button>
+        <button type="button" class="btn-secondary btn-small" data-seg-csv="${esc(sg.id)}" ${sg.contactable ? '' : 'disabled'}>Descargar CSV</button>
+      </div>
+      <div class="segment-list hidden" id="seg-list-${esc(sg.id)}">
+        ${sg.contacts.slice(0, 30).map(c => `<p><strong>${esc(c.name)}</strong> · ${esc(c.phone)} · ${esc(c.model)} <small class="muted">${esc(c.detail)}</small></p>`).join('')}
+        ${sg.contacts.length > 30 ? `<p class="muted">…y ${sg.contacts.length - 30} más en el CSV.</p>` : ''}
+      </div>
+    </section>`).join('');
+  box.querySelectorAll('[data-seg-view]').forEach(b => b.addEventListener('click', () =>
+    document.getElementById('seg-list-' + b.dataset.segView).classList.toggle('hidden')));
+  box.querySelectorAll('[data-seg-csv]').forEach(b => b.addEventListener('click', () => {
+    const sg = segments.find(x => x.id === b.dataset.segCsv);
+    csvDownload(`marketing-${sg.id}-${localDateInput(new Date())}.csv`, [
+      ['Nombre', 'name'], ['Teléfono', 'phone'], ['Equipo', 'model'], ['Fecha', 'date'], ['Detalle', 'detail'], ['Acción sugerida', () => sg.action]
+    ], sg.contacts);
+  }));
+}
+
+function renderStock(stock) {
+  document.getElementById('stock-rules').textContent =
+    `Demanda calculada con los últimos ${stock.rules.demandWindowDays} días. "Stock sugerido" = lo que se usa en ${stock.rules.stockWeeks} semanas. ` +
+    '"Vuelven por garantía" mide la calidad del repuesto o proveedor: si es alto, cambia de proveedor.';
+  const priorityClass = { Alta: 'pill-alert', Media: 'pill-warn', Baja: '' };
+  document.getElementById('stock-table').innerHTML = `
+    <thead><tr><th>Prioridad</th><th>Repuesto</th><th>Modelo</th><th class="num">En el período</th><th class="num">Tendencia</th><th class="num">Por semana</th><th class="num">Stock sugerido</th><th class="num">Vuelven por garantía</th></tr></thead>
+    <tbody>${stock.parts.map(r => `<tr>
+      <td><span class="pill ${priorityClass[r.priority]}">${esc(r.priority)}</span></td>
+      <td><strong>${esc(r.part)}</strong></td>
+      <td>${esc(r.model)}</td>
+      <td class="num">${r.period} <small class="muted">(antes ${r.previous})</small></td>
+      <td class="num">${changeBadge(r.trend)}</td>
+      <td class="num">${r.perWeek}</td>
+      <td class="num"><strong>${r.suggested}</strong></td>
+      <td class="num">${r.warrantyReturns ? `<span class="pill ${r.returnRate >= 10 ? 'pill-alert' : 'pill-warn'}">${r.warrantyReturns} · ${r.returnRate}%</span>` : '0'}</td>
+    </tr>`).join('') || '<tr><td colspan="8" class="muted">Todavía no hay reparaciones con repuesto en los últimos 90 días.</td></tr>'}</tbody>`;
+  document.getElementById('models-table').innerHTML = `
+    <thead><tr><th>Modelo</th><th class="num">Órdenes</th><th class="num">Tendencia</th></tr></thead>
+    <tbody>${stock.topModels.map(m => `<tr><td>${esc(m.label)}</td><td class="num">${m.value} <small class="muted">(antes ${m.previous})</small></td><td class="num">${changeBadge(m.change)}</td></tr>`).join('')
+      || '<tr><td colspan="3" class="muted">Sin órdenes en el período.</td></tr>'}</tbody>`;
+  document.getElementById('acc-table').innerHTML = `
+    <thead><tr><th>Modelo</th><th class="num">Fundas / protectores</th><th class="num">Cargadores</th></tr></thead>
+    <tbody>${stock.accessories.map(a => `<tr><td>${esc(a.model)}</td><td class="num">${a.cases}</td><td class="num">${a.chargers}</td></tr>`).join('')
+      || '<tr><td colspan="3" class="muted">Sin oportunidades en el período.</td></tr>'}</tbody>`;
+}

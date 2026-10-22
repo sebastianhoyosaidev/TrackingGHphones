@@ -1,3 +1,23 @@
+# Migración de base de datos — v1.4.0
+
+Automática al iniciar `backend/server.js`. Solo **agrega** columnas; no cambia ni borra datos existentes. Haz `npm run backup` antes, como siempre.
+
+- `orders.warranty_of INTEGER NULL`: id de la orden original cuando la orden es una garantía.
+- `orders.warranty_result TEXT NULL`: `Cubierta` | `No cubierta` | `Vencida`.
+- `orders.warranty_reason TEXT NULL`: causa elegida por el personal.
+- `orders.price REAL NULL`: precio acordado. Las órdenes anteriores quedan sin precio (el panel avisa cuántas).
+- `orders.marketing_opt_in INTEGER NOT NULL DEFAULT 0`: permiso de promociones. Las órdenes anteriores quedan en 0 (sin permiso).
+- `order_events.details TEXT NULL`: texto de eventos de garantía.
+- Índice `idx_orders_warranty_of`.
+
+Las fechas de garantía se calculan con el evento real de `Entregado` del historial, así que las órdenes ya entregadas antes de esta versión también muestran su garantía.
+
+**Zona horaria:** desde v1.4.0 el servidor usa `America/New_York` (o la variable `TZ`). Las órdenes creadas antes con hora UTC conservan su hora guardada (aparecen 4–5 h adelantadas); no se reescriben para no alterar datos.
+
+**Reversión:** volver al código anterior funciona con la base migrada (ignora las columnas nuevas).
+
+---
+
 # Migración local de base de datos — v1.3.0
 
 La versión 1.3.0 agrega asignación de técnico, fecha prometida y un historial común de eventos. La migración corre automáticamente al iniciar `backend/server.js`; no modifica tickets, clientes, códigos de consulta, estados actuales ni filas de auditoría existentes.

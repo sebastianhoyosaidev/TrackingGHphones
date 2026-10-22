@@ -54,13 +54,23 @@
     </div>
   </section>
 
-  <!-- ============ DASHBOARD ============ -->
+  <!-- ============ DASHBOARD (v1.4.0) ============ -->
   <section id="view-dashboard" class="view dashboard-view">
     <div class="dashboard-heading">
       <div><p class="eyebrow">GEEKS HOLLYWOOD · OPERACIONES</p><h2>Panel del taller</h2>
-        <p class="muted">Seguimiento de órdenes, carga de trabajo y entregas.</p></div>
-      <button type="button" class="btn-secondary" id="dashboard-export">Descargar reporte CSV</button>
+        <p class="muted" id="dash-period-label">Seguimiento de órdenes, clientes y repuestos.</p></div>
+      <button type="button" class="btn-secondary" id="dashboard-export">Descargar órdenes (CSV)</button>
     </div>
+
+    <div class="range-bar" id="dash-ranges" role="group" aria-label="Período rápido">
+      <button type="button" class="range-chip" data-range="today">Hoy</button>
+      <button type="button" class="range-chip" data-range="7">7 días</button>
+      <button type="button" class="range-chip active" data-range="30">30 días</button>
+      <button type="button" class="range-chip" data-range="month">Este mes</button>
+      <button type="button" class="range-chip" data-range="90">90 días</button>
+      <button type="button" class="range-chip" data-range="year">Este año</button>
+    </div>
+
     <form id="dashboard-filters" class="dashboard-filters" aria-label="Filtros del panel">
       <label>Desde<input type="date" id="dash-from"></label>
       <label>Hasta<input type="date" id="dash-to"></label>
@@ -68,22 +78,75 @@
       <label>Técnico<select id="dash-technician"><option value="">Todos los técnicos</option></select></label>
       <label>Equipo<select id="dash-device"><option value="">Todos los equipos</option></select></label>
       <label>Agrupar por<select id="dash-interval"><option value="day">Día</option><option value="week">Semana</option><option value="month">Mes</option></select></label>
-      <button type="submit" class="btn-primary">Aplicar filtros</button>
     </form>
+
+    <nav class="subtabs" id="dash-subtabs" aria-label="Secciones del panel">
+      <button type="button" class="subtab active" data-pane="summary">Resumen</button>
+      <button type="button" class="subtab" data-pane="customers">Clientes</button>
+      <button type="button" class="subtab" data-pane="marketing">Marketing</button>
+      <button type="button" class="subtab" data-pane="stock">Repuestos y accesorios</button>
+    </nav>
+
     <p id="dashboard-state" class="dashboard-state" role="status" aria-live="polite">Cargando datos…</p>
-    <div id="dashboard-content" class="hidden">
-      <div class="kpi-grid" id="dashboard-kpis" aria-label="Indicadores del taller"></div>
-      <div class="dashboard-grid">
-        <section class="chart-panel chart-panel-wide"><h3>Órdenes creadas por período</h3><div id="chart-created" class="bar-chart"></div></section>
-        <section class="chart-panel"><h3>Órdenes por estado</h3><div id="chart-status" class="bar-chart"></div></section>
-        <section class="chart-panel"><h3>Carga y entregas por técnico</h3><div id="chart-technicians" class="bar-chart"></div></section>
-        <section class="chart-panel"><h3>Equipos</h3><div id="chart-devices" class="bar-chart"></div></section>
-        <section class="chart-panel"><h3>Problemas más frecuentes</h3><div id="chart-issues" class="bar-chart"></div></section>
-        <section class="chart-panel"><h3>Antigüedad de órdenes abiertas</h3><p class="chart-note">Envejecida: abierta durante 3 días o más.</p><div id="chart-aging" class="bar-chart"></div></section>
-        <section class="chart-panel"><h3>Tiempo esperando recogida</h3><p class="chart-note">Una orden se considera atrasada para recogida después de 48 horas en Listo.</p><div id="chart-pickup" class="bar-chart"></div></section>
-        <section class="chart-panel"><h3>Tiempo de reparación</h3><p id="turnaround-summary" class="chart-note"></p><div id="chart-turnaround" class="bar-chart"></div></section>
+    <div id="dashboard-content" class="dashboard-content hidden">
+
+      <!-- Resumen -->
+      <div class="dash-pane active" id="pane-summary">
+        <section class="money-panel" aria-label="Dinero por entrar">
+          <h3>💵 Dinero por entrar <small>(órdenes sin entregar, ahora mismo)</small></h3>
+          <div class="money-grid" id="dash-money"></div>
+          <p class="chart-note" id="dash-money-note"></p>
+        </section>
+        <div class="compare-grid" id="dash-compare" aria-label="Comparado con el período anterior"></div>
+        <div class="kpi-grid" id="dashboard-kpis" aria-label="Indicadores del taller"></div>
+        <div class="dashboard-grid">
+          <section class="chart-panel chart-panel-wide"><h3>Órdenes creadas por período</h3><div id="chart-created" class="bar-chart"></div></section>
+          <section class="chart-panel"><h3>Órdenes por estado</h3><div id="chart-status" class="bar-chart"></div></section>
+          <section class="chart-panel"><h3>Carga y entregas por técnico</h3><div id="chart-technicians" class="bar-chart"></div></section>
+          <section class="chart-panel"><h3>Equipos</h3><div id="chart-devices" class="bar-chart"></div></section>
+          <section class="chart-panel"><h3>Problemas más frecuentes</h3><div id="chart-issues" class="bar-chart"></div></section>
+          <section class="chart-panel"><h3>Antigüedad de órdenes abiertas</h3><p class="chart-note">Envejecida: abierta durante 3 días o más.</p><div id="chart-aging" class="bar-chart"></div></section>
+          <section class="chart-panel"><h3>Tiempo esperando recogida</h3><p class="chart-note">Atrasada para recogida después de 48 horas en Listo.</p><div id="chart-pickup" class="bar-chart"></div></section>
+          <section class="chart-panel chart-panel-wide"><h3>Tiempo de reparación</h3><p id="turnaround-summary" class="chart-note"></p><div id="chart-turnaround" class="bar-chart"></div></section>
+        </div>
+        <p class="dashboard-footnote">Toca cualquier barra para ver esas órdenes. Los porcentajes comparan con el mismo número de días justo antes del período elegido. Ingresos = suma del "precio acordado" de las órdenes entregadas en el período.</p>
       </div>
-      <p class="dashboard-footnote">El tiempo de reparación se mide desde la recepción hasta Entregado usando el historial guardado. Las órdenes antiguas sin asignación histórica no se atribuyen a un técnico.</p>
+
+      <!-- Clientes -->
+      <div class="dash-pane" id="pane-customers">
+        <div class="kpi-grid" id="cust-kpis"></div>
+        <section class="chart-panel">
+          <div class="panel-head">
+            <h3>Clientes</h3>
+            <div class="panel-tools">
+              <input type="search" id="cust-search" placeholder="Buscar nombre o teléfono…" aria-label="Buscar cliente">
+              <button type="button" class="btn-secondary btn-small" id="cust-export">Descargar clientes (CSV)</button>
+            </div>
+          </div>
+          <p class="chart-note">Un cliente se reconoce por su teléfono; si no dejó teléfono, por su nombre. Ordenados por visitas.</p>
+          <div class="table-wrap"><table class="data-table" id="cust-table"></table></div>
+        </section>
+        <p class="dashboard-footnote">Clientes, Marketing y Repuestos usan solo el rango de fechas (no los filtros de estado, técnico o equipo).</p>
+      </div>
+
+      <!-- Marketing -->
+      <div class="dash-pane" id="pane-marketing">
+        <p class="consent-note"><strong>Importante:</strong> solo aparecen como "contactables" los clientes con teléfono que <strong>aceptaron recibir promociones</strong> al dejar su equipo. En EE. UU. enviar ofertas por mensaje sin permiso puede generar multas (ley TCPA).</p>
+        <div class="segment-grid" id="mkt-segments"></div>
+      </div>
+
+      <!-- Repuestos -->
+      <div class="dash-pane" id="pane-stock">
+        <section class="chart-panel">
+          <h3>Repuestos: qué tener en stock</h3>
+          <p class="chart-note" id="stock-rules"></p>
+          <div class="table-wrap"><table class="data-table" id="stock-table"></table></div>
+        </section>
+        <div class="dashboard-grid">
+          <section class="chart-panel"><h3>Modelos más atendidos</h3><p class="chart-note">En el período, comparado con el anterior.</p><div class="table-wrap"><table class="data-table" id="models-table"></table></div></section>
+          <section class="chart-panel"><h3>Accesorios para vender</h3><p class="chart-note">Fundas/protectores: pantalla o tapa rota que llegó sin funda. Cargadores: llegó sin cargador.</p><div class="table-wrap"><table class="data-table" id="acc-table"></table></div></section>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -101,6 +164,10 @@
 
       <label>Teléfono (opcional)
         <input type="tel" id="f-phone" placeholder="Ej: 754-555-0132">
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="f-optin">
+        <span>El cliente <strong>acepta recibir promociones</strong> por mensaje <small>(pregúntale; sin permiso no se le envían ofertas)</small></span>
       </label>
 
       <div class="field">
@@ -150,6 +217,9 @@
 
       <label>¿Qué se acordó con el cliente? *
         <textarea id="f-agreement" rows="2" required placeholder="Ej: Se entrega en 2 días, costo $80"></textarea>
+      </label>
+      <label>Precio acordado en $ (opcional)
+        <input type="number" id="f-price" min="0" max="100000" step="0.01" inputmode="decimal" placeholder="Ej: 80">
       </label>
 
       <p id="form-error" class="error hidden"></p>
@@ -253,6 +323,13 @@
       <label>¿Qué se acordó? *
         <textarea id="e-agreement" rows="2" required></textarea>
       </label>
+      <label>Precio acordado en $
+        <input type="number" id="e-price" min="0" max="100000" step="0.01" inputmode="decimal">
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="e-optin">
+        <span>El cliente acepta recibir promociones por mensaje</span>
+      </label>
       <label>Estado
         <select id="e-status">
           <option>Recibido</option>
@@ -267,6 +344,58 @@
         <button type="submit" class="btn-primary">Guardar cambios</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- ============ WARRANTY MODAL (v1.4.0) ============ -->
+<div id="warranty-modal" class="modal hidden">
+  <div class="modal-card">
+    <h2>Garantía / Devolución <span id="w-ticket"></span></h2>
+    <div id="w-info" class="warranty-info"></div>
+    <form id="warranty-form" autocomplete="off">
+      <div class="field">
+        <span class="field-label">¿Qué problema tiene ahora? * <small>(puedes marcar varios)</small></span>
+        <div class="chips multi" id="w-problems"></div>
+      </div>
+      <label>¿Qué dice el cliente? *
+        <textarea id="w-diagnostic" rows="2" placeholder="Ej: La pantalla nueva dejó de responder al tacto"></textarea>
+      </label>
+      <div class="field">
+        <span class="field-label">¿Cómo llegó? <small>(puedes marcar varios)</small></span>
+        <div class="chips multi" id="w-arrival"></div>
+      </div>
+      <div class="field">
+        <span class="field-label">¿Qué lo causó? *</span>
+        <div class="chips" id="w-cause"></div>
+      </div>
+      <p id="w-damage-warning" class="warranty-warning hidden"></p>
+      <p id="w-result" class="warranty-result"></p>
+      <label>Técnico responsable (opcional)
+        <select id="w-technician"><option value="">Sin asignar</option></select>
+      </label>
+      <label>Fecha prometida (opcional)
+        <input type="date" id="w-promised-at">
+      </label>
+      <label>Precio en $ (opcional; 0 si la garantía lo cubre)
+        <input type="number" id="w-price" min="0" max="100000" step="0.01" inputmode="decimal">
+      </label>
+      <label>¿Qué se acordó con el cliente? *
+        <textarea id="w-agreement" rows="2" placeholder="Ej: Se cambia la pantalla sin costo, listo mañana"></textarea>
+      </label>
+      <p id="w-error" class="error hidden"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="btn-warranty-cancel">Cancelar</button>
+        <button type="submit" class="btn-primary">Abrir garantía</button>
+      </div>
+    </form>
+    <div id="w-success" class="hidden">
+      <p class="success-label" id="w-success-label">¡Garantía abierta!</p>
+      <p class="success-sub">Ticket interno del taller:</p>
+      <div class="ticket-big" id="w-ticket-big"></div>
+      <p class="success-sub">Código para el cliente <small>(con esto consulta su estado)</small>:</p>
+      <div class="ticket-big" id="w-code-big"></div>
+      <button type="button" class="btn-primary" id="btn-warranty-close">Cerrar</button>
+    </div>
   </div>
 </div>
 

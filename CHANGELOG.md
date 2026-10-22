@@ -3,6 +3,53 @@
 Notas de cada versión publicada. El código vive en este repo privado;
 la app de verdad corre en el servidor (Oracle Cloud).
 
+## v1.4.0 — 2026-10-22 — Garantías, dinero por entrar y panel de clientes, marketing y repuestos
+
+**Garantía / devolución (60 días)**
+- Botón "Garantía / Devolución" en cada orden Entregada. La tarjeta muestra
+  hasta cuándo tiene garantía y cuántos días quedan (60 días desde la entrega;
+  configurable con `WARRANTY_DAYS`).
+- La garantía crea una orden nueva vinculada a la original (la original no se
+  modifica). El servidor decide el resultado: **Cubierta** (falla de fábrica o
+  de la reparación dentro del plazo), **No cubierta** (daño del cliente:
+  partido, golpe, mojado) o **Vencida** (más de 60 días).
+- Aviso si se marca "falla de fábrica" pero el equipo llegó mojado, golpeado o
+  con la tapa partida. No se permite abrir dos garantías a la vez para la
+  misma orden. Queda registrado en el historial de ambas órdenes y la consulta
+  del cliente muestra la fecha de fin de garantía.
+
+**Dinero**
+- Campo nuevo "Precio acordado en $" (opcional) en Nueva orden, Editar y
+  Garantía. Validado en el servidor (0–100 000).
+- Panel: "Dinero por entrar" con total abierto, recibido, en reparación y
+  listo para cobrar; cobrado hoy; dinero en órdenes listas hace más de 48 h;
+  aviso de órdenes sin precio.
+
+**Panel más fluido y preciso**
+- Períodos rápidos (Hoy, 7 días, 30 días, Este mes, 90 días, Este año).
+  Los filtros se aplican solos; el contenido no parpadea al actualizar.
+- Comparación con el período anterior (▲▼ %) para órdenes, entregas, cobrado,
+  ticket promedio y garantías.
+- Pestañas nuevas: **Clientes** (nuevos, recurrentes, gasto, búsqueda,
+  exportar CSV), **Marketing** (5 segmentos accionables con lista y CSV) y
+  **Repuestos y accesorios** (demanda por repuesto y modelo, tendencia, stock
+  sugerido para 2 semanas, tasa de regreso por garantía como indicador de
+  calidad del proveedor, modelos más atendidos, oportunidades de venta de
+  fundas/protectores y cargadores).
+- Casilla "El cliente acepta recibir promociones": solo esos clientes aparecen
+  como contactables en Marketing (cumplimiento TCPA).
+
+**Correcciones**
+- Zona horaria del taller (`America/New_York`, configurable con `TZ`): antes
+  las horas se guardaban en UTC (4–5 h adelantadas).
+- El campo de contraseña del login no tenía estilo.
+- Confirmación antes de marcar Entregado (no se puede deshacer).
+- Si la sesión caduca, la página lo dice y vuelve al login en vez de mostrar
+  "Error al guardar" o "Revisa la conexión".
+- Errores al avanzar estado ahora se muestran.
+- Los CSV escapan valores que empiezan por `= + - @` (inyección de fórmulas
+  en Excel).
+
 ## v1.3.0 — 2026-10-21 — Panel operativo, asignación y reportes
 
 **Panel de operaciones**

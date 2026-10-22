@@ -164,9 +164,32 @@ if (!orderCols.includes('assigned_technician')) {
 if (!orderCols.includes('promised_at')) {
   db.exec('ALTER TABLE orders ADD COLUMN promised_at TEXT');
 }
+// Garantías (v1.4.0): una garantía es una orden nueva vinculada a la orden
+// entregada original (warranty_of). warranty_result: Cubierta | No cubierta |
+// Vencida. warranty_reason: la causa que eligió el personal.
+if (!orderCols.includes('warranty_of')) {
+  db.exec('ALTER TABLE orders ADD COLUMN warranty_of INTEGER');
+}
+if (!orderCols.includes('warranty_result')) {
+  db.exec('ALTER TABLE orders ADD COLUMN warranty_result TEXT');
+}
+if (!orderCols.includes('warranty_reason')) {
+  db.exec('ALTER TABLE orders ADD COLUMN warranty_reason TEXT');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_orders_warranty_of ON orders(warranty_of)');
+// Panel (v1.4.0): precio acordado (opcional) y permiso de marketing del cliente.
+if (!orderCols.includes('price')) {
+  db.exec('ALTER TABLE orders ADD COLUMN price REAL');
+}
+if (!orderCols.includes('marketing_opt_in')) {
+  db.exec('ALTER TABLE orders ADD COLUMN marketing_opt_in INTEGER NOT NULL DEFAULT 0');
+}
 const eventCols = db.prepare('PRAGMA table_info(order_events)').all().map(c => c.name);
 if (!eventCols.includes('previous_technician')) {
   db.exec('ALTER TABLE order_events ADD COLUMN previous_technician TEXT');
+}
+if (!eventCols.includes('details')) {
+  db.exec('ALTER TABLE order_events ADD COLUMN details TEXT');
 }
 db.exec(`
   INSERT OR IGNORE INTO order_events
@@ -404,13 +427,53 @@ function nextTicket() {
   return 'GH-' + String(row.value).padStart(4, '0');
 }
 
+// ============ GARANTÍA ============
+// Días de garantía desde la entrega (configurable con WARRANTY_DAYS).
+const WARRANTY_DAYS = parseInt(process.env.WARRANTY_DAYS || '60', 10);
+const WARRANTY_CAUSES = {
+  fabrica: 'Falla de fábrica / de la reparación',
+  cliente: 'Daño del cliente (partido, golpe, mojado…)',
+};
+
+// Fecha local de hoy (YYYY-MM-DD) según la zona horaria del taller.
+function localToday() {
+  return db.prepare("SELECT date('now', 'localtime') AS d").get().d;
+}
+function addDays(dateStr, n) {
+  const d = new Date(`${dateStr.slice(0, 10)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function daysBetween(fromDate, toDate) {
+  return Math.round((Date.parse(`${toDate.slice(0, 10)}T00:00:00Z`) -
+    Date.parse(`${fromDate.slice(0, 10)}T00:00:00Z`)) / 86400000);
+}
+// La garantía cubre hasta el día "entrega + WARRANTY_DAYS" inclusive.
+function warrantyInfo(deliveredAt) {
+  if (!deliveredAt) return null;
+  const until = addDays(deliveredAt, WARRANTY_DAYS);
+  const daysLeft = daysBetween(localToday(), until);
+  return { warranty_until: until, warranty_days_left: daysLeft, warranty_active: daysLeft >= 0 };
+}
+
+// Subconsultas reutilizables (requieren el alias de tabla de orders).
+const deliveredAtSql = alias => `(SELECT MAX(e.created_at) FROM order_events e
+  WHERE e.order_id = ${alias}.id AND e.event_type = 'status' AND e.to_status = 'Entregado')`;
+const warrantyOfTicketSql = alias => `(SELECT w.ticket FROM orders w WHERE w.id = ${alias}.warranty_of)`;
+
+function getDeliveredAt(orderId) {
+  return db.prepare(`SELECT ${deliveredAtSql('o')} AS d FROM orders o WHERE o.id = ?`).get(orderId)?.d || null;
+}
+
 function toPublic(row) {
   if (!row) return null;
-  return {
+  const out = {
     ...row,
     problems: JSON.parse(row.problems || '[]'),
     arrival_condition: JSON.parse(row.arrival_condition || '[]'),
   };
+  if (row.status === 'Entregado' && row.delivered_at) Object.assign(out, warrantyInfo(row.delivered_at));
+  return out;
 }
 
 // Límites de longitud (defensa en el servidor; el frontend no los impone).
@@ -487,6 +550,13 @@ function validateOrder(body) {
       errors.push('La fecha prometida no es válida.');
     }
   }
+  if (body.price !== undefined && body.price !== null && body.price !== '') {
+    const price = Number(body.price);
+    if (!Number.isFinite(price) || price < 0 || price > 100000) errors.push('El precio no es válido.');
+  }
+  if (body.marketing_opt_in !== undefined && typeof body.marketing_opt_in !== 'boolean') {
+    errors.push('El permiso de promociones no es válido.');
+  }
   const problems = checkStringList(body, 'problems', 'Los problemas', errors);
   checkStringList(body, 'arrival_condition', 'Cómo llegó', errors);
   if (problems && problems.length === 0) errors.push('Elige al menos un problema.');
@@ -494,6 +564,11 @@ function validateOrder(body) {
     errors.push('Si es diagnóstico, escribe qué dice el cliente.');
   }
   return errors;
+}
+
+function priceValue(v) {
+  if (v === undefined || v === null || v === '') return null;
+  return Math.round(Number(v) * 100) / 100;
 }
 
 function readOrderFilters(query) {
@@ -581,7 +656,9 @@ app.get('/api/orders', (req, res) => {
   let sql = `SELECT orders.*,
     (SELECT e.created_at FROM order_events e WHERE e.order_id = orders.id
       AND e.event_type = 'status' AND e.to_status = orders.status
-      ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at
+      ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at,
+    ${deliveredAtSql('orders')} AS delivered_at,
+    ${warrantyOfTicketSql('orders')} AS warranty_of_ticket
     FROM orders` + where.sql;
   const params = [...where.params];
   if (search.trim()) {
@@ -757,6 +834,279 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
   });
 });
 
+// ============ INSIGHTS (v1.4.0): clientes, marketing y repuestos ============
+// Todo se calcula con datos ya guardados. Fechas en la zona horaria del taller.
+// Período actual = [from, to]; período anterior = mismo número de días justo antes.
+
+// Problema -> repuesto que normalmente se usa. "No carga", "No enciende",
+// "Mojado", "Software", "Diagnóstico" y "Otro" no implican un repuesto fijo.
+const PART_FOR_PROBLEM = {
+  'Pantalla partida': 'Pantalla',
+  'Backglass roto': 'Backglass (tapa trasera)',
+  'Charging port': 'Puerto de carga',
+  'Cámara frontal': 'Cámara frontal',
+  'Cámara trasera': 'Cámara trasera',
+  'Batería': 'Batería',
+};
+const SCREEN_PROBLEMS = ['Pantalla partida', 'Backglass roto'];
+const STOCK_WEEKS = 2;          // stock sugerido = demanda de 2 semanas
+const DEMAND_WINDOW_DAYS = 90;  // ventana para estimar demanda semanal
+const INACTIVE_DAYS = 90;       // cliente "inactivo" si no vuelve en 90 días
+
+function stripAccents(s) {
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+// Un cliente = mismo teléfono (últimos 10 dígitos); sin teléfono, mismo nombre.
+function customerKey(o) {
+  const digits = String(o.phone || '').replace(/\D/g, '');
+  if (digits.length >= 7) return 'tel:' + digits.slice(-10);
+  return 'nom:' + stripAccents(String(o.customer_name || '').trim().toLowerCase()).replace(/\s+/g, ' ');
+}
+// "iphone 13 pro" e "iPhone 13 Pro" son el mismo modelo.
+function modelKey(o) {
+  return `${o.device_type}|${stripAccents(String(o.model || '').trim().toLowerCase()).replace(/\s+/g, ' ')}`;
+}
+function pctChange(cur, prev) {
+  if (!prev) return cur ? null : 0; // null = "nuevo" (no había antes)
+  return Math.round(((cur - prev) / prev) * 100);
+}
+
+app.get('/api/insights', staffRateLimit, requireAuth, (req, res) => {
+  const today = localToday();
+  const to = localDateOnly(req.query.to) ? req.query.to : today;
+  const from = localDateOnly(req.query.from) ? req.query.from : addDays(to, -29);
+  if (from > to) return res.status(400).json({ error: 'El inicio del período debe ser anterior al final.' });
+  const spanDays = daysBetween(from, to) + 1;
+  const prevTo = addDays(from, -1);
+  const prevFrom = addDays(from, -spanDays);
+  const demandFrom = addDays(today, -(DEMAND_WINDOW_DAYS - 1));
+
+  const deliveredAt = new Map();
+  for (const e of db.prepare(`SELECT order_id, MAX(created_at) AS at FROM order_events
+      WHERE event_type = 'status' AND to_status = 'Entregado' GROUP BY order_id`).all()) {
+    deliveredAt.set(e.order_id, e.at);
+  }
+  const all = db.prepare('SELECT * FROM orders ORDER BY created_at ASC, id ASC').all().map(o => ({
+    ...o,
+    day: o.created_at.slice(0, 10),
+    problems: JSON.parse(o.problems || '[]'),
+    arrival: JSON.parse(o.arrival_condition || '[]'),
+    delivered_day: deliveredAt.has(o.id) ? deliveredAt.get(o.id).slice(0, 10) : null,
+  }));
+  const byId = new Map(all.map(o => [o.id, o]));
+  const between = (day, a, b) => day && day >= a && day <= b;
+  const cur = all.filter(o => between(o.day, from, to));
+  const prev = all.filter(o => between(o.day, prevFrom, prevTo));
+
+  // ---------- Resumen comparado con el período anterior ----------
+  const deliveredIn = (a, b) => all.filter(o => between(o.delivered_day, a, b));
+  const revenue = list => Math.round(list.reduce((sum, o) => sum + (o.price || 0), 0) * 100) / 100;
+  const pricedCount = list => list.filter(o => o.price !== null && o.price !== undefined).length;
+  const curDelivered = deliveredIn(from, to);
+  const prevDelivered = deliveredIn(prevFrom, prevTo);
+  const claimsCur = cur.filter(o => o.warranty_of);
+  const claimsPrev = prev.filter(o => o.warranty_of);
+  const metric = (value, previous) => ({ value, previous, change: pctChange(value, previous) });
+  const summary = {
+    orders: metric(cur.length, prev.length),
+    delivered: metric(curDelivered.length, prevDelivered.length),
+    revenue: metric(revenue(curDelivered), revenue(prevDelivered)),
+    avgTicket: metric(
+      pricedCount(curDelivered) ? Math.round(revenue(curDelivered) / pricedCount(curDelivered)) : 0,
+      pricedCount(prevDelivered) ? Math.round(revenue(prevDelivered) / pricedCount(prevDelivered)) : 0),
+    pricedShare: curDelivered.length ? Math.round((pricedCount(curDelivered) / curDelivered.length) * 100) : null,
+    warrantyClaims: metric(claimsCur.length, claimsPrev.length),
+    warrantyCovered: claimsCur.filter(o => o.warranty_result === 'Cubierta').length,
+  };
+
+  // ---------- Dinero por entrar (estado actual, no depende de las fechas) ----------
+  // Suma del precio acordado de las órdenes que aún no se entregan.
+  const openOrders = all.filter(o => o.status !== 'Entregado');
+  const money = list => ({
+    count: list.length,
+    value: revenue(list),
+    withoutPrice: list.filter(o => o.price === null || o.price === undefined).length,
+  });
+  const pipeline = {
+    received: money(openOrders.filter(o => o.status === 'Recibido')),
+    inRepair: money(openOrders.filter(o => o.status === 'En reparación')),
+    ready: money(openOrders.filter(o => o.status === 'Listo')),
+    open: money(openOrders),
+    collectedToday: revenue(all.filter(o => o.delivered_day === today)),
+    readyWaiting48h: money(openOrders.filter(o => o.status === 'Listo' && o.updated_at &&
+      (Date.now() - Date.parse(o.updated_at.replace(' ', 'T'))) >= 48 * 3600000)),
+  };
+
+  // ---------- Clientes ----------
+  const customers = new Map();
+  for (const o of all) {
+    const key = customerKey(o);
+    const c = customers.get(key) || {
+      key, name: '', phone: '', visits: 0, first: o.day, last: o.day, models: new Set(),
+      optIn: false, spent: 0, warrantyClaims: 0,
+    };
+    c.name = o.customer_name;              // nombre más reciente
+    if (o.phone) c.phone = o.phone;
+    c.visits++;
+    c.last = o.day;
+    c.models.add(`${o.device_type} ${o.model}`.trim());
+    c.optIn = o.marketing_opt_in === 1;    // el permiso más reciente manda
+    if (o.status === 'Entregado' && o.price) c.spent += o.price;
+    if (o.warranty_of) c.warrantyClaims++;
+    customers.set(key, c);
+  }
+  const keyOf = new Map(all.map(o => [o.id, customerKey(o)]));
+  const periodKeys = new Set(cur.map(o => keyOf.get(o.id)));
+  const newKeys = [...periodKeys].filter(k => customers.get(k).first >= from);
+  const prevPeriodKeys = new Set(prev.map(o => keyOf.get(o.id)));
+  // Nuevo en el período anterior = su primera visita cae en ese período.
+  const prevNew = [...prevPeriodKeys].filter(k => customers.get(k).first >= prevFrom);
+  const publicCustomer = c => ({
+    name: c.name, phone: c.phone, visits: c.visits, first: c.first, last: c.last,
+    models: [...c.models].slice(-3), optIn: c.optIn, spent: Math.round(c.spent * 100) / 100,
+    warrantyClaims: c.warrantyClaims, daysSinceLast: daysBetween(c.last, today),
+  });
+  const allCustomers = [...customers.values()].map(publicCustomer)
+    .sort((a, b) => b.visits - a.visits || b.spent - a.spent || b.last.localeCompare(a.last));
+  const customerSummary = {
+    inPeriod: periodKeys.size,
+    new: metric(newKeys.length, prevNew.length),
+    returning: periodKeys.size - newKeys.length,
+    returningRate: periodKeys.size ? Math.round(((periodKeys.size - newKeys.length) / periodKeys.size) * 100) : 0,
+    total: customers.size,
+    withPhone: allCustomers.filter(c => c.phone).length,
+    optedIn: allCustomers.filter(c => c.optIn && c.phone).length,
+    noPhoneInPeriod: cur.filter(o => !String(o.phone || '').replace(/\D/g, '')).length,
+  };
+
+  // ---------- Marketing: segmentos accionables ----------
+  // Solo se pueden contactar clientes con teléfono Y permiso de promociones.
+  const segment = (id, title, action, rows) => {
+    const seen = new Map();
+    for (const r of rows) if (!seen.has(r.key)) seen.set(r.key, r);
+    const list = [...seen.values()];
+    const contacts = list.filter(r => r.optIn && r.phone);
+    return { id, title, action, total: list.length, contactable: contacts.length,
+      contacts: contacts.map(({ key, ...rest }) => rest) };
+  };
+  const row = (o, detail) => {
+    const c = customers.get(keyOf.get(o.id));
+    return { key: c.key, name: c.name, phone: c.phone, optIn: c.optIn,
+      model: `${o.device_type} ${o.model}`.trim(), date: o.delivered_day || o.day, detail };
+  };
+  const recent = all.filter(o => between(o.day, from, to));
+  const segments = [
+    segment('review', 'Entregados en los últimos 14 días', 'Pedir reseña en Google',
+      all.filter(o => between(o.delivered_day, addDays(today, -13), today) && o.warranty_result !== 'No cubierta')
+        .map(o => row(o, 'Entregado'))),
+    segment('cases', 'Pantalla o tapa rota y llegó sin funda', 'Ofrecer funda + protector de pantalla',
+      recent.filter(o => o.problems.some(p => SCREEN_PROBLEMS.includes(p)) && !o.arrival.includes('Con funda'))
+        .map(o => row(o, o.problems.filter(p => SCREEN_PROBLEMS.includes(p)).join(', ')))),
+    segment('chargers', 'Llegó sin cargador o con falla de carga', 'Ofrecer cargador / cable original',
+      recent.filter(o => o.arrival.includes('Sin cargador') || o.problems.includes('Charging port') || o.problems.includes('No carga'))
+        .map(o => row(o, o.arrival.includes('Sin cargador') ? 'Sin cargador' : 'Falla de carga'))),
+    segment('warranty-ending', 'Garantía vence en los próximos 7 días', 'Ofrecer revisión gratis antes de que venza',
+      all.filter(o => o.status === 'Entregado' && o.delivered_day && !o.warranty_of)
+        .filter(o => { const left = daysBetween(today, addDays(o.delivered_day, WARRANTY_DAYS)); return left >= 0 && left <= 7; })
+        .map(o => row(o, `Vence ${addDays(o.delivered_day, WARRANTY_DAYS)}`))),
+    segment('inactive', `No vuelven hace más de ${INACTIVE_DAYS} días`, 'Promoción de regreso / recordatorio',
+      [...customers.values()].filter(c => daysBetween(c.last, today) > INACTIVE_DAYS)
+        .map(c => ({ key: c.key, name: c.name, phone: c.phone, optIn: c.optIn,
+          model: [...c.models].pop() || '', date: c.last, detail: `${daysBetween(c.last, today)} días` }))),
+  ];
+
+  // ---------- Repuestos: qué tener en stock ----------
+  const partRows = new Map();
+  const modelLabel = new Map(); // modelKey -> nombre más usado
+  const labelCounts = new Map();
+  for (const o of all) {
+    const mk = modelKey(o);
+    // "iPhone 13" ya trae la marca; "S23" no: se le antepone el tipo.
+    const model = o.model.trim();
+    const hasBrand = o.device_type === 'Otro' ||
+      stripAccents(model.toLowerCase()).startsWith(stripAccents(o.device_type.toLowerCase()));
+    const label = hasBrand ? model : `${o.device_type} ${model}`;
+    const counts = labelCounts.get(mk) || new Map();
+    counts.set(label, (counts.get(label) || 0) + 1);
+    labelCounts.set(mk, counts);
+  }
+  for (const [mk, counts] of labelCounts) {
+    modelLabel.set(mk, [...counts].sort((a, b) => b[1] - a[1])[0][0]);
+  }
+  const bump = (o, field) => {
+    for (const problem of o.problems) {
+      const part = PART_FOR_PROBLEM[problem];
+      if (!part) continue;
+      const mk = modelKey(o);
+      const id = `${part}|${mk}`;
+      const r = partRows.get(id) || { part, model: modelLabel.get(mk), period: 0, previous: 0, last90: 0, warrantyReturns: 0, repairs90: 0 };
+      r[field]++;
+      partRows.set(id, r);
+    }
+  };
+  // Las garantías "No cubierta"/"Vencida" sí consumen repuesto; las cubiertas
+  // también (se repone la pieza). Todas cuentan como demanda.
+  for (const o of cur) bump(o, 'period');
+  for (const o of prev) bump(o, 'previous');
+  for (const o of all.filter(x => between(x.day, demandFrom, today))) bump(o, 'last90');
+  // Calidad: reparaciones originales (90 días) que volvieron por garantía cubierta.
+  for (const o of all.filter(x => !x.warranty_of && between(x.day, demandFrom, today))) bump(o, 'repairs90');
+  for (const claim of all.filter(o => o.warranty_of && o.warranty_result === 'Cubierta')) {
+    const original = byId.get(claim.warranty_of);
+    if (original && between(original.day, demandFrom, today)) bump(original, 'warrantyReturns');
+  }
+  const weeks = DEMAND_WINDOW_DAYS / 7;
+  const parts = [...partRows.values()].map(r => {
+    const perWeek = Math.round((r.last90 / weeks) * 10) / 10;
+    const suggested = r.last90 ? Math.max(1, Math.ceil((r.last90 / weeks) * STOCK_WEEKS)) : 0;
+    const trend = pctChange(r.period, r.previous);
+    const returnRate = r.repairs90 ? Math.round((r.warrantyReturns / r.repairs90) * 100) : 0;
+    let priority = 'Baja';
+    if (suggested >= 2 || (r.period >= 3 && (trend === null || trend > 0))) priority = 'Alta';
+    else if (r.last90 >= 2) priority = 'Media';
+    return { ...r, perWeek, suggested, trend, returnRate, priority };
+  }).filter(r => r.period || r.previous || r.last90)
+    .sort((a, b) => ({ Alta: 0, Media: 1, Baja: 2 }[a.priority] - { Alta: 0, Media: 1, Baja: 2 }[b.priority])
+      || b.last90 - a.last90 || b.period - a.period);
+
+  // Accesorios: oportunidades de venta por modelo en el período.
+  const accessoriesByModel = new Map();
+  for (const o of cur) {
+    const label = modelLabel.get(modelKey(o));
+    const a = accessoriesByModel.get(label) || { model: label, cases: 0, chargers: 0 };
+    if (o.problems.some(p => SCREEN_PROBLEMS.includes(p)) && !o.arrival.includes('Con funda')) a.cases++;
+    if (o.arrival.includes('Sin cargador')) a.chargers++;
+    accessoriesByModel.set(label, a);
+  }
+  const accessories = [...accessoriesByModel.values()].filter(a => a.cases || a.chargers)
+    .sort((a, b) => (b.cases + b.chargers) - (a.cases + a.chargers)).slice(0, 12);
+
+  // Modelos más atendidos en el período (para decidir qué modelos cubrir).
+  const modelCounts = new Map();
+  for (const o of cur) {
+    const label = modelLabel.get(modelKey(o));
+    modelCounts.set(label, (modelCounts.get(label) || 0) + 1);
+  }
+  const prevModelCounts = new Map();
+  for (const o of prev) {
+    const label = modelLabel.get(modelKey(o));
+    prevModelCounts.set(label, (prevModelCounts.get(label) || 0) + 1);
+  }
+  const topModels = [...modelCounts].map(([label, value]) => ({
+    label, value, previous: prevModelCounts.get(label) || 0, change: pctChange(value, prevModelCounts.get(label) || 0),
+  })).sort((a, b) => b.value - a.value).slice(0, 10);
+
+  res.json({
+    generatedAt: new Date().toISOString(),
+    period: { from, to, days: spanDays, prevFrom, prevTo, today },
+    summary,
+    pipeline,
+    customers: { summary: customerSummary, top: allCustomers.slice(0, 10), all: allCustomers },
+    segments,
+    stock: { parts, accessories, topModels, rules: { stockWeeks: STOCK_WEEKS, demandWindowDays: DEMAND_WINDOW_DAYS } },
+  });
+});
+
 // Una sola orden por id (para edición). Protegido con requireAuth como el
 // resto de /api/orders/* (B-2: openEdit ya no descarga todas las órdenes).
 app.get('/api/orders/:id', (req, res) => {
@@ -764,7 +1114,9 @@ app.get('/api/orders/:id', (req, res) => {
     SELECT o.*,
       (SELECT e.created_at FROM order_events e WHERE e.order_id = o.id
         AND e.event_type = 'status' AND e.to_status = o.status
-        ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at
+        ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at,
+      ${deliveredAtSql('o')} AS delivered_at,
+      ${warrantyOfTicketSql('o')} AS warranty_of_ticket
     FROM orders o WHERE o.id = ?
   `).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Orden no encontrada.' });
@@ -795,18 +1147,89 @@ app.post('/api/orders', (req, res) => {
   res.status(201).json(toPublic(row));
 });
 
+// Garantía / devolución de una orden ya entregada.
+// Crea una ORDEN NUEVA vinculada a la original (la original no se toca, así
+// su historial y las métricas de entrega siguen siendo correctos).
+// Resultado, decidido aquí y no en el navegador:
+//   - Vencida:     pasaron más de WARRANTY_DAYS días desde la entrega.
+//   - No cubierta: dentro del plazo, pero es daño del cliente.
+//   - Cubierta:    dentro del plazo y es falla de fábrica / de la reparación.
+// Una orden "No cubierta" o "Vencida" se trabaja como reparación normal (con costo).
+app.post('/api/orders/:id/warranty', (req, res) => {
+  const original = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  if (!original) return res.status(404).json({ error: 'Orden no encontrada.' });
+  if (original.status !== 'Entregado') {
+    return res.status(409).json({ error: 'Solo se abre garantía de una orden ya entregada.' });
+  }
+  const open = db.prepare("SELECT ticket FROM orders WHERE warranty_of = ? AND status <> 'Entregado'").get(original.id);
+  if (open) {
+    return res.status(409).json({ error: `Ya hay una garantía abierta para esta orden: ${open.ticket}.` });
+  }
+  const p = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const cause = typeof p.cause === 'string' ? p.cause : '';
+  // Los datos del cliente y del equipo salen de la orden original.
+  const body = {
+    customer_name: original.customer_name,
+    phone: original.phone || '',
+    device_type: original.device_type,
+    model: original.model,
+    imei: original.imei || '',
+    problems: p.problems,
+    arrival_condition: p.arrival_condition,
+    received_by: req.staffUser.username,
+    agreement: p.agreement,
+    diagnostic_note: p.diagnostic_note,
+    assigned_technician: p.assigned_technician,
+    promised_at: p.promised_at,
+    price: p.price,
+    marketing_opt_in: original.marketing_opt_in === 1,
+  };
+  const errors = validateOrder(body);
+  if (!isNonEmptyString(p.diagnostic_note)) errors.push('Escribe qué dice el cliente que le pasa.');
+  if (!Object.prototype.hasOwnProperty.call(WARRANTY_CAUSES, cause)) {
+    errors.push('Elige si es falla de fábrica o daño del cliente.');
+  }
+  if (errors.length) return res.status(400).json({ errors: [...new Set(errors)] });
+
+  const deliveredAt = getDeliveredAt(original.id) || original.updated_at;
+  const info = warrantyInfo(deliveredAt);
+  const result = !info.warranty_active ? 'Vencida' : (cause === 'cliente' ? 'No cubierta' : 'Cubierta');
+
+  const row = withTransaction(() => {
+    const ticket = nextTicket();
+    const inserted = insertOrderWithCodeRetry(ticket, body,
+      { of: original.id, result, reason: WARRANTY_CAUSES[cause] });
+    const created = db.prepare('SELECT * FROM orders WHERE id = ?').get(inserted.lastInsertRowid);
+    const actor = req.staffUser.username;
+    recordOrderEvent(created.id, created.ticket, 'status', null, 'Recibido', actor, created.assigned_technician);
+    if (created.assigned_technician) {
+      recordOrderEvent(created.id, created.ticket, 'technician_assigned', null, null, actor, created.assigned_technician);
+    }
+    const insertDetail = db.prepare(`
+      INSERT INTO order_events (order_id, ticket, event_type, actor, details) VALUES (?, ?, ?, ?, ?)
+    `);
+    insertDetail.run(created.id, created.ticket, 'warranty_opened', actor,
+      `Garantía de ${original.ticket}: ${result} — ${WARRANTY_CAUSES[cause]}`);
+    insertDetail.run(original.id, original.ticket, 'warranty_claim', actor,
+      `Volvió por garantía: ${created.ticket} (${result})`);
+    return created;
+  });
+  res.status(201).json({ ...toPublic(row), warranty_of_ticket: original.ticket });
+});
+
 // Inserta la orden reintentando el customer_code si colisiona (UNIQUE).
 // Colisiones son astronómicamente improbables (8 chars, ~1 billón de
 // combinaciones), pero el reintento evita un 500 espurio si alguna ocurre.
-function insertOrderWithCodeRetry(ticket, b) {
+// `warranty` viene solo del servidor (endpoint de garantía), nunca del body.
+function insertOrderWithCodeRetry(ticket, b, warranty = {}) {
   const MAX_CODE_ATTEMPTS = 5;
   for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt++) {
     const customerCode = generateCustomerCode();
     try {
       return db.prepare(`
         INSERT INTO orders
-          (ticket, customer_code, customer_name, phone, device_type, model, imei, problems, arrival_condition, received_by, agreement, diagnostic_note, assigned_technician, promised_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibido')
+          (ticket, customer_code, customer_name, phone, device_type, model, imei, problems, arrival_condition, received_by, agreement, diagnostic_note, assigned_technician, promised_at, price, marketing_opt_in, warranty_of, warranty_result, warranty_reason, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recibido')
       `).run(
         ticket,
         customerCode,
@@ -821,7 +1244,12 @@ function insertOrderWithCodeRetry(ticket, b) {
         b.agreement.trim(),
         (b.diagnostic_note || '').trim(),
         (b.assigned_technician || '').trim() || null,
-        (b.promised_at || '').trim() || null
+        (b.promised_at || '').trim() || null,
+        priceValue(b.price),
+        b.marketing_opt_in === true ? 1 : 0,
+        warranty.of ?? null,
+        warranty.result ?? null,
+        warranty.reason ?? null
       );
     } catch (e) {
       const isCodeCollision = e && e.code === 'ERR_SQLITE_ERROR' &&
@@ -854,6 +1282,10 @@ function toCustomerView(row) {
     status: row.status,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    // Garantía: hasta cuándo (si ya se entregó) y, si es una garantía, su resultado.
+    warranty_until: row.status === 'Entregado'
+      ? (warrantyInfo(getDeliveredAt(row.id)) || {}).warranty_until || null : null,
+    warranty_result: row.warranty_result || null,
   };
 }
 
@@ -901,7 +1333,7 @@ app.get('/api/orders/:id/history', (req, res) => {
   if (!order) return res.status(404).json({ error: 'Orden no encontrada.' });
   const events = db.prepare(`
     SELECT id, order_id, ticket, event_type, from_status, to_status,
-      previous_technician, assigned_technician, actor, created_at
+      previous_technician, assigned_technician, actor, details, created_at
     FROM order_events WHERE order_id = ? ORDER BY created_at ASC, id ASC
   `).all(req.params.id);
   res.json(events);
@@ -937,6 +1369,8 @@ app.put('/api/orders/:id', (req, res) => {
   const promisedAt = Object.prototype.hasOwnProperty.call(b, 'promised_at')
     ? ((b.promised_at || '').trim() || null) : existing.promised_at;
   const status = STATUSES.includes(b.status) ? b.status : existing.status;
+  const price = Object.prototype.hasOwnProperty.call(b, 'price') ? priceValue(b.price) : existing.price;
+  const optIn = typeof b.marketing_opt_in === 'boolean' ? (b.marketing_opt_in ? 1 : 0) : existing.marketing_opt_in;
   // B-3: la máquina de estados se impone en el servidor. Solo se permite
   // quedarse en el mismo estado o avanzar; las regresiones (p. ej.
   // Entregado -> Recibido) se rechazan porque casi siempre son un error.
@@ -950,7 +1384,8 @@ app.put('/api/orders/:id', (req, res) => {
       UPDATE orders SET
         customer_name = ?, phone = ?, device_type = ?, model = ?, imei = ?,
         problems = ?, arrival_condition = ?, received_by = ?, agreement = ?,
-        diagnostic_note = ?, assigned_technician = ?, promised_at = ?, status = ?, updated_at = datetime('now', 'localtime')
+        diagnostic_note = ?, assigned_technician = ?, promised_at = ?, price = ?, marketing_opt_in = ?,
+        status = ?, updated_at = datetime('now', 'localtime')
       WHERE id = ?
     `).run(
       b.customer_name.trim(),
@@ -965,6 +1400,8 @@ app.put('/api/orders/:id', (req, res) => {
       (b.diagnostic_note || '').trim(),
       assignedTechnician,
       promisedAt,
+      price,
+      optIn,
       status,
       req.params.id
     );

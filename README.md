@@ -19,6 +19,9 @@ Built for **Geeks Hollywood** (4514 Hollywood Blvd, Hollywood, FL · (754) 888-9
 - **Operational dashboard (v1.3.0)** — Spanish KPI cards, date/status/technician/device filters, clickable lightweight bar charts, and a filtered CSV report
 - **Technician assignment** — optional responsible technician from the six-person roster; separate from the authenticated user who received the device
 - **Promised date and workflow history** — optional promised completion date, status-change timestamps, technician assignment history, and order history on each card
+- **Warranty / returns (v1.4.0)** — 60-day warranty from delivery. A claim is a new order linked to the original; the server decides *Cubierta* (factory/repair defect within 60 days), *No cubierta* (customer damage) or *Vencida* (over 60 days)
+- **Money (v1.4.0)** — optional agreed price per order; dashboard shows money still to collect (open / in repair / ready), collected, average ticket
+- **Customers, marketing and parts insights (v1.4.0)** — repeat customers, marketing segments limited to customers who opted in to promotions (TCPA), parts demand per model with suggested stock and warranty-return rate, accessory sales opportunities
 - **Customer status lookup** — the customer enters their code (not the ticket) and sees only minimal info: ticket, name, device, problems and status. Never phone, IMEI, notes or agreements. Rate-limited (30/min per IP)
 - **Rate limiting on staff routes** — `/api/orders*` limited to 300 requests/min per IP (429 if exceeded); tunable via `STAFF_RATE_LIMIT_MAX` / `TRACK_RATE_LIMIT_MAX` env vars
 - **Audit trail** — every status change (advance, edit, delete) is recorded with timestamp, order, from/to status and actor; viewable at `GET /api/orders/:id/audit`
@@ -86,7 +89,7 @@ Abre **http://localhost:3000** e inicia sesión con tu usuario de `.env`.
 
 ## Panel e interpretación de métricas
 
-El panel usa datos de órdenes y del historial local de estados. No inventa asignaciones antiguas. Las fechas "hoy" y los cortes de fecha usan la hora local del servidor SQLite.
+El panel usa datos de órdenes y del historial local de estados. No inventa asignaciones antiguas. Las fechas "hoy" y los cortes de fecha usan la zona horaria del taller (`America/New_York` por defecto; se cambia con la variable `TZ`).
 
 | Indicador o gráfico | Regla |
 |---|---|
@@ -141,6 +144,8 @@ WAL sidecar files (`repairshop.db-wal`, `repairshop.db-shm`) are recreated autom
 | DELETE | `/api/orders/:id`         | Delete an order (only in `Recibido` status; 404/409 otherwise) |
 | GET    | `/api/orders/:id/audit`   | Status-change history of an order (audit trail) |
 | GET    | `/api/orders/:id/history` | Status and technician assignment events |
+| POST   | `/api/orders/:id/warranty`| Open a warranty claim for a delivered order (`problems`, `diagnostic_note`, `cause`: `fabrica`/`cliente`, `agreement`, optional `arrival_condition`, `assigned_technician`, `promised_at`, `price`) |
+| GET    | `/api/insights`           | Customers, marketing segments, parts/stock and money pipeline (`from`, `to`) |
 
 ## Notes
 
