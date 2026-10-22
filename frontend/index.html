@@ -131,7 +131,7 @@
 
       <!-- Marketing -->
       <div class="dash-pane" id="pane-marketing">
-        <p class="consent-note"><strong>Importante:</strong> solo aparecen como "contactables" los clientes con teléfono que <strong>aceptaron recibir promociones</strong> al dejar su equipo. En EE. UU. enviar ofertas por mensaje sin permiso puede generar multas (ley TCPA).</p>
+        <p class="consent-note"><strong>Importante:</strong> solo aparecen como "contactables" los clientes con teléfono que <strong>aceptaron recibir promociones</strong> al dejar su equipo. En EE. UU. enviar ofertas por mensaje sin permiso puede generar multas (ley TCPA). Los <strong>avisos de servicio</strong> (por ejemplo, "su equipo está listo") no son publicidad y se pueden enviar a cualquier cliente con teléfono.</p>
         <div class="segment-grid" id="mkt-segments"></div>
       </div>
 
@@ -165,6 +165,7 @@
       <label>Teléfono (opcional)
         <input type="tel" id="f-phone" placeholder="Ej: 754-555-0132">
       </label>
+      <div id="f-customer-match" class="customer-match hidden" aria-live="polite"></div>
       <label class="check-row">
         <input type="checkbox" id="f-optin">
         <span>El cliente <strong>acepta recibir promociones</strong> por mensaje <small>(pregúntale; sin permiso no se le envían ofertas)</small></span>

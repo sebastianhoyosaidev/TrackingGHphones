@@ -281,6 +281,7 @@ document.getElementById('intake-form').addEventListener('submit', async (e) => {
 
 document.getElementById('btn-new-order').addEventListener('click', () => {
   document.getElementById('intake-form').reset();
+  clearCustomerMatch();
   document.getElementById('f-received-by').value = currentUser || '';
   ['f-device-type', 'f-problems', 'f-arrival'].forEach(id => setSelected(id, []));
   toggleDiag('f-problems', 'diag-wrap');
@@ -290,7 +291,10 @@ document.getElementById('btn-new-order').addEventListener('click', () => {
 
 // ---------- Orders list ----------
 let currentStatusFilter = '';
-document.getElementById('orders-search').addEventListener('input', loadOrders);
+document.getElementById('orders-search').addEventListener('input', () => {
+  clearTimeout(ordersSearchTimer);
+  ordersSearchTimer = setTimeout(loadOrders, 250);
+});
 for (const id of ['orders-from', 'orders-to', 'orders-technician', 'orders-device', 'orders-problem']) {
   document.getElementById(id).addEventListener('change', loadOrders);
 }
@@ -314,7 +318,14 @@ document.querySelectorAll('#status-filter .chip').forEach(b => {
   });
 });
 
-async function loadOrders() {
+// Se muestran 50 órdenes y "Mostrar más" carga las siguientes.
+const ORDERS_PAGE = 50;
+let ordersShown = ORDERS_PAGE;
+let ordersSearchTimer = null;
+
+async function loadOrders(opts) {
+  // Un filtro nuevo vuelve a la primera página; "Mostrar más" la conserva.
+  if (!(opts && opts.keepPage === true)) ordersShown = ORDERS_PAGE;
   const list = document.getElementById('orders-list');
   const q = new URLSearchParams({
     search: document.getElementById('orders-search').value,
@@ -323,16 +334,18 @@ async function loadOrders() {
     to: document.getElementById('orders-to').value,
     technician: document.getElementById('orders-technician').value,
     device_type: document.getElementById('orders-device').value,
-    problem: document.getElementById('orders-problem').value.trim()
+    problem: document.getElementById('orders-problem').value.trim(),
+    limit: String(ordersShown)
   });
   ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned']
     .forEach(key => { if (list.dataset[key]) q.set(key, list.dataset[key]); });
-  list.innerHTML = '<p class="empty">Cargando órdenes…</p>';
+  if (!list.children.length || !(opts && opts.keepPage)) list.innerHTML = '<p class="empty">Cargando órdenes…</p>';
   try {
     const response = await api('/api/orders?' + q);
     if (response.status === 401) return sessionExpired();
     if (!response.ok) throw new Error('No se pudieron cargar las órdenes.');
     const orders = await response.json();
+    const total = Number(response.headers.get('X-Total-Count')) || orders.length;
     if (!orders.length) {
       list.innerHTML = '<p class="empty">No hay órdenes aquí todavía.</p>';
       return;
@@ -367,6 +380,18 @@ async function loadOrders() {
         <div class="order-history hidden" id="order-history-${o.id}" aria-live="polite"></div>`;
       list.appendChild(card);
     });
+    const summary = document.createElement('p');
+    summary.className = 'orders-count';
+    summary.textContent = `Mostrando ${orders.length} de ${total} órdenes`;
+    list.prepend(summary);
+    if (total > orders.length) {
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'btn-secondary btn-more';
+      more.textContent = `Mostrar más (${total - orders.length} restantes)`;
+      more.addEventListener('click', () => { ordersShown += ORDERS_PAGE; loadOrders({ keepPage: true }); });
+      list.appendChild(more);
+    }
     list.querySelectorAll('.btn-advance').forEach(b =>
       b.addEventListener('click', () => advanceOrder(b.dataset.id, b.dataset.status)));
     list.querySelectorAll('.btn-edit').forEach(b =>
@@ -427,7 +452,7 @@ async function advanceOrder(id, currentStatus) {
   } catch {
     alert('No se pudo conectar con el servidor.');
   }
-  loadOrders();
+  loadOrders({ keepPage: true });
 }
 
 // La sesión dura 12 h. Si caduca, se avisa y se vuelve al login (lo escrito
@@ -446,7 +471,7 @@ async function deleteOrder(id) {
       alert(data.error || 'No se pudo eliminar.');
       return;
     }
-    loadOrders();
+    loadOrders({ keepPage: true });
   } catch {
     alert('No se pudo conectar con el servidor.');
   }
@@ -540,7 +565,7 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
       return;
     }
     document.getElementById('edit-modal').classList.add('hidden');
-    loadOrders();
+    loadOrders({ keepPage: true });
   } catch {
     err.textContent = 'No se pudo conectar con el servidor.';
     err.classList.remove('hidden');
@@ -947,7 +972,7 @@ document.getElementById('warranty-form').addEventListener('submit', async (e) =>
 
 function closeWarranty() {
   document.getElementById('warranty-modal').classList.add('hidden');
-  loadOrders();
+  loadOrders({ keepPage: true });
 }
 document.getElementById('btn-warranty-cancel').addEventListener('click', () =>
   document.getElementById('warranty-modal').classList.add('hidden'));
@@ -976,7 +1001,7 @@ function csvDownload(filename, columns, rows) {
 
 function changeBadge(change, { inverse = false } = {}) {
   if (change === null) return '<span class="delta up">nuevo</span>';
-  if (!change) return '<span class="delta flat">= igual</span>';
+  if (!change) return '<span class="delta flat">≈ igual</span>';
   const good = inverse ? change < 0 : change > 0;
   return `<span class="delta ${good ? 'up' : 'down'}">${change > 0 ? '▲' : '▼'} ${Math.abs(change)}%</span>`;
 }
@@ -1083,11 +1108,11 @@ function renderSegments(segments) {
   const box = document.getElementById('mkt-segments');
   box.innerHTML = segments.map(sg => `
     <section class="segment-card">
-      <h3>${esc(sg.title)}</h3>
+      <h3>${esc(sg.title)}${sg.transactional ? ' <span class="pill pill-ok">Aviso de servicio</span>' : ''}</h3>
       <p class="segment-action">→ ${esc(sg.action)}</p>
       <div class="segment-numbers">
         <span><strong>${sg.total}</strong> clientes</span>
-        <span><strong>${sg.contactable}</strong> contactables</span>
+        <span><strong>${sg.contactable}</strong> ${sg.transactional ? 'con teléfono' : 'contactables'}</span>
       </div>
       <div class="segment-buttons">
         <button type="button" class="btn-secondary btn-small" data-seg-view="${esc(sg.id)}" ${sg.contactable ? '' : 'disabled'}>Ver lista</button>
@@ -1133,4 +1158,62 @@ function renderStock(stock) {
     <thead><tr><th>Modelo</th><th class="num">Fundas / protectores</th><th class="num">Cargadores</th></tr></thead>
     <tbody>${stock.accessories.map(a => `<tr><td>${esc(a.model)}</td><td class="num">${a.cases}</td><td class="num">${a.chargers}</td></tr>`).join('')
       || '<tr><td colspan="3" class="muted">Sin oportunidades en el período.</td></tr>'}</tbody>`;
+}
+
+// ---------- Cliente conocido en el mostrador (v1.4.0) ----------
+// Al escribir el teléfono se busca el historial: evita duplicar órdenes y
+// avisa si el equipo está en garantía (para no cobrar lo que es gratis).
+let lookupTimer = null;
+let lookupSeq = 0;
+function clearCustomerMatch() {
+  const box = document.getElementById('f-customer-match');
+  box.classList.add('hidden');
+  box.replaceChildren();
+}
+document.getElementById('f-phone').addEventListener('input', () => {
+  clearTimeout(lookupTimer);
+  lookupTimer = setTimeout(lookupCustomer, 350);
+});
+
+async function lookupCustomer() {
+  const phone = document.getElementById('f-phone').value;
+  const seq = ++lookupSeq;
+  if (phone.replace(/\D/g, '').length < 7) return clearCustomerMatch();
+  try {
+    const r = await api('/api/customers/lookup?phone=' + encodeURIComponent(phone));
+    if (seq !== lookupSeq) return;
+    if (r.status === 401) return sessionExpired();
+    const c = r.ok ? await r.json() : { found: false };
+    if (!c.found) return clearCustomerMatch();
+    renderCustomerMatch(c);
+  } catch { clearCustomerMatch(); }
+}
+
+function renderCustomerMatch(c) {
+  const box = document.getElementById('f-customer-match');
+  const dev = o => `${o.device_type === 'Otro' || o.model.toLowerCase().startsWith(o.device_type.toLowerCase()) ? '' : o.device_type + ' '}${o.model}`;
+  box.innerHTML = `
+    <p class="match-title">👤 Cliente que ya vino: <strong>${esc(c.name)}</strong> · ${c.visits} ${c.visits === 1 ? 'visita' : 'visitas'}${c.spent ? ` · ${esc(money(c.spent))}` : ''}</p>
+    ${c.inWarranty.map(o => `
+      <div class="match-row match-warranty">
+        <span>🛡 <strong>En garantía:</strong> ${esc(o.ticket)} · ${esc(dev(o))} (${esc(o.problems.join(', '))}) · hasta ${esc(o.warranty_until)}</span>
+        <button type="button" class="btn-small btn-match-warranty" data-id="${o.id}">Abrir garantía</button>
+      </div>`).join('')}
+    ${c.open.map(o => `
+      <div class="match-row match-open">
+        <span>⚠ <strong>Ya tiene una orden abierta:</strong> ${esc(o.ticket)} · ${esc(dev(o))} · ${esc(o.status)}</span>
+        <button type="button" class="btn-small btn-match-open" data-ticket="${esc(o.ticket)}">Ver</button>
+      </div>`).join('')}
+    <p class="match-recent">Últimas: ${c.recent.map(o => `${esc(o.ticket)} ${esc(dev(o))} (${esc(o.problems.join(', '))})`).join(' · ')}</p>
+    <button type="button" class="btn-small btn-match-fill">Usar sus datos</button>`;
+  box.classList.remove('hidden');
+  box.querySelector('.btn-match-fill').addEventListener('click', () => {
+    document.getElementById('f-name').value = c.name;
+    document.getElementById('f-optin').checked = !!c.optIn;
+  });
+  box.querySelectorAll('.btn-match-warranty').forEach(b => b.addEventListener('click', () => openWarranty(b.dataset.id)));
+  box.querySelectorAll('.btn-match-open').forEach(b => b.addEventListener('click', () => {
+    document.getElementById('orders-search').value = b.dataset.ticket;
+    document.querySelector('.tab[data-view=orders]').click();
+  }));
 }

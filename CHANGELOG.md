@@ -39,6 +39,23 @@ la app de verdad corre en el servidor (Oracle Cloud).
 - Casilla "El cliente acepta recibir promociones": solo esos clientes aparecen
   como contactables en Marketing (cumplimiento TCPA).
 
+**Mostrador y lista de órdenes**
+- Al escribir el teléfono en Nueva orden, la app reconoce al cliente: muestra
+  sus visitas, avisa si tiene una **orden abierta** (evita duplicados) o un
+  equipo **en garantía** (botón para abrir la garantía en vez de cobrar), y
+  permite usar sus datos guardados.
+- Búsqueda sin importar tildes/mayúsculas y con el teléfono en cualquier
+  formato ("2395550108", "(239) 555-0108", "239-555-0108").
+- La lista de Órdenes carga de 50 en 50 ("Mostrar más") en vez de todo de
+  golpe; la búsqueda espera a que termines de escribir.
+- Marketing: lista nueva "Listos y sin recoger (3+ días)" como **aviso de
+  servicio** (se puede avisar a cualquier cliente con teléfono).
+
+**Taller simulado (para pruebas)**
+- `node seed-demo.js` crea `demo.db` con 6 meses de órdenes falsas realistas
+  (clientes que repiten, garantías, equipos sin recoger, precios). Nunca toca
+  `repairshop.db`. La app la usa con `DB_FILE=demo.db`.
+
 **Correcciones**
 - Zona horaria del taller (`America/New_York`, configurable con `TZ`): antes
   las horas se guardaban en UTC (4–5 h adelantadas).

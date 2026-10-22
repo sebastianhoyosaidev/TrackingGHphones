@@ -73,7 +73,10 @@ const staffRateLimit = makeRateLimiter({
 app.use('/api/orders', staffRateLimit);
 app.use('/api/orders', requireAuth); // login obligatorio en todo lo del taller
 
-const db = new DatabaseSync(path.join(__dirname, 'repairshop.db'));
+// DB_FILE permite usar otra base (p. ej. demo.db para el taller simulado).
+// Por defecto, la base real: backend/repairshop.db.
+const DB_FILE = path.resolve(__dirname, process.env.DB_FILE || 'repairshop.db');
+const db = new DatabaseSync(DB_FILE);
 // WAL: las lecturas no bloquean a las escrituras (y viceversa); busy_timeout
 // de 5 s para esperar el candado en vez de fallar de inmediato.
 db.exec('PRAGMA journal_mode = WAL;');
@@ -641,36 +644,78 @@ function buildOrderWhere(filters) {
   return { sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '', params };
 }
 
-// B-9: escapa los comodines de LIKE (\, %, _) para que se busquen como
-// texto literal y no alteren los resultados de la búsqueda.
-function escapeLike(s) {
-  return s.replace(/[\\%_]/g, c => '\\' + c);
+// Texto normalizado para buscar: sin tildes, minúsculas, espacios simples.
+function normalizeText(s) {
+  return stripAccents(String(s || '').toLowerCase()).replace(/\s+/g, ' ').trim();
 }
 
-// List orders (search + status filter)
+// List orders (search + filters + paging)
+// La búsqueda se hace en JS para que:
+//   - "Carmen Diaz" encuentre "Carmen Díaz" (sin importar tildes/mayúsculas)
+//   - "2395550108", "(239) 555-0108" o "5550108" encuentren "239-555-0108"
+// Paginación opcional: ?limit=N&offset=M. La cabecera X-Total-Count dice cuántas
+// hay en total. Sin limit devuelve todas (lo usa la descarga CSV).
 app.get('/api/orders', (req, res) => {
-  const search = typeof req.query.search === 'string' ? req.query.search : '';
+  const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : '';
   const status = typeof req.query.status === 'string' ? req.query.status : '';
   const filters = readOrderFilters({ ...req.query, status: status || '' });
   const where = buildOrderWhere(filters);
-  let sql = `SELECT orders.*,
+  // Fase 1: solo los campos de búsqueda (ligero).
+  let candidates = db.prepare(`SELECT id, customer_name, ticket, model, phone FROM orders${where.sql} ORDER BY id DESC`)
+    .all(...where.params);
+  if (search) {
+    const text = normalizeText(search);
+    const digits = search.replace(/\D/g, '');
+    candidates = candidates.filter(o =>
+      normalizeText(o.customer_name).includes(text) ||
+      normalizeText(o.ticket).includes(text) ||
+      normalizeText(o.model).includes(text) ||
+      (digits.length >= 4 && String(o.phone || '').replace(/\D/g, '').includes(digits)));
+  }
+  const total = candidates.length;
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 0, 0), 1000);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const page = limit ? candidates.slice(offset, offset + limit) : candidates;
+  res.setHeader('X-Total-Count', String(total));
+  if (!page.length) return res.json([]);
+  // Fase 2: filas completas solo de la página.
+  const ids = page.map(o => o.id);
+  const rows = db.prepare(`SELECT orders.*,
     (SELECT e.created_at FROM order_events e WHERE e.order_id = orders.id
       AND e.event_type = 'status' AND e.to_status = orders.status
       ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at,
     ${deliveredAtSql('orders')} AS delivered_at,
     ${warrantyOfTicketSql('orders')} AS warranty_of_ticket
-    FROM orders` + where.sql;
-  const params = [...where.params];
-  if (search.trim()) {
-    const likeCols = ['customer_name', 'ticket', 'model', 'phone']
-      .map(c => `${c} LIKE ? ESCAPE '\\'`).join(' OR ');
-    sql += (where.sql ? ' AND ' : ' WHERE ') + `(${likeCols})`;
-    const like = `%${escapeLike(search.trim())}%`;
-    params.push(like, like, like, like);
-  }
-  sql += ' ORDER BY id DESC';
-  const rows = db.prepare(sql).all(...params).map(toPublic);
-  res.json(rows);
+    FROM orders WHERE orders.id IN (${ids.map(() => '?').join(',')}) ORDER BY orders.id DESC`).all(...ids);
+  res.json(rows.map(toPublic));
+});
+
+// Búsqueda de cliente en el mostrador (al escribir el teléfono en Nueva orden).
+// Devuelve su historial y si tiene una orden abierta o una garantía vigente,
+// para no duplicar órdenes ni cobrar algo que debería ir por garantía.
+app.get('/api/customers/lookup', staffRateLimit, requireAuth, (req, res) => {
+  const digits = String(req.query.phone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length < 7) return res.json({ found: false });
+  const rows = db.prepare(`SELECT orders.*, ${deliveredAtSql('orders')} AS delivered_at,
+      ${warrantyOfTicketSql('orders')} AS warranty_of_ticket
+    FROM orders WHERE phone <> '' ORDER BY id DESC`).all()
+    .filter(o => o.phone.replace(/\D/g, '').slice(-10).endsWith(digits));
+  if (!rows.length) return res.json({ found: false });
+  const orders = rows.map(toPublic);
+  // Garantía vigente: entregada, no es a su vez una garantía, y sin otra garantía abierta.
+  const openClaimFor = new Set(orders.filter(o => o.warranty_of && o.status !== 'Entregado').map(o => o.warranty_of));
+  res.json({
+    found: true,
+    name: orders[0].customer_name,
+    phone: orders[0].phone,
+    optIn: orders[0].marketing_opt_in === 1,
+    visits: orders.length,
+    spent: Math.round(orders.filter(o => o.status === 'Entregado').reduce((s, o) => s + (o.price || 0), 0) * 100) / 100,
+    open: orders.filter(o => o.status !== 'Entregado').map(o => ({ id: o.id, ticket: o.ticket, device_type: o.device_type, model: o.model, status: o.status, problems: o.problems })),
+    inWarranty: orders.filter(o => o.status === 'Entregado' && o.warranty_active && !o.warranty_of && !openClaimFor.has(o.id))
+      .map(o => ({ id: o.id, ticket: o.ticket, device_type: o.device_type, model: o.model, problems: o.problems, warranty_until: o.warranty_until, warranty_days_left: o.warranty_days_left })),
+    recent: orders.slice(0, 5).map(o => ({ id: o.id, ticket: o.ticket, device_type: o.device_type, model: o.model, problems: o.problems, status: o.status, created_at: o.created_at, price: o.price })),
+  });
 });
 
 function localDateOnly(value) {
@@ -866,6 +911,13 @@ function customerKey(o) {
 function modelKey(o) {
   return `${o.device_type}|${stripAccents(String(o.model || '').trim().toLowerCase()).replace(/\s+/g, ' ')}`;
 }
+// Nombre legible: "iPhone 13" ya trae la marca; "S23" no, se le antepone el tipo.
+function displayModel(o) {
+  const model = String(o.model || '').trim();
+  const type = String(o.device_type || '');
+  const hasBrand = type === 'Otro' || stripAccents(model.toLowerCase()).startsWith(stripAccents(type.toLowerCase()));
+  return hasBrand ? model : `${type} ${model}`;
+}
 function pctChange(cur, prev) {
   if (!prev) return cur ? null : 0; // null = "nuevo" (no había antes)
   return Math.round(((cur - prev) / prev) * 100);
@@ -949,7 +1001,7 @@ app.get('/api/insights', staffRateLimit, requireAuth, (req, res) => {
     if (o.phone) c.phone = o.phone;
     c.visits++;
     c.last = o.day;
-    c.models.add(`${o.device_type} ${o.model}`.trim());
+    c.models.add(displayModel(o));
     c.optIn = o.marketing_opt_in === 1;    // el permiso más reciente manda
     if (o.status === 'Entregado' && o.price) c.spent += o.price;
     if (o.warranty_of) c.warrantyClaims++;
@@ -981,21 +1033,29 @@ app.get('/api/insights', staffRateLimit, requireAuth, (req, res) => {
 
   // ---------- Marketing: segmentos accionables ----------
   // Solo se pueden contactar clientes con teléfono Y permiso de promociones.
-  const segment = (id, title, action, rows) => {
+  // transactional = aviso sobre SU equipo (no es publicidad): basta con teléfono.
+  const segment = (id, title, action, rows, { transactional = false } = {}) => {
     const seen = new Map();
     for (const r of rows) if (!seen.has(r.key)) seen.set(r.key, r);
     const list = [...seen.values()];
-    const contacts = list.filter(r => r.optIn && r.phone);
-    return { id, title, action, total: list.length, contactable: contacts.length,
+    const contacts = list.filter(r => r.phone && (transactional || r.optIn));
+    return { id, title, action, transactional, total: list.length, contactable: contacts.length,
       contacts: contacts.map(({ key, ...rest }) => rest) };
   };
   const row = (o, detail) => {
     const c = customers.get(keyOf.get(o.id));
     return { key: c.key, name: c.name, phone: c.phone, optIn: c.optIn,
-      model: `${o.device_type} ${o.model}`.trim(), date: o.delivered_day || o.day, detail };
+      model: displayModel(o), date: o.delivered_day || o.day, detail };
   };
   const recent = all.filter(o => between(o.day, from, to));
+  const listoSince = new Map(db.prepare(`SELECT order_id, MAX(created_at) AS at FROM order_events
+      WHERE event_type = 'status' AND to_status = 'Listo' GROUP BY order_id`).all().map(r => [r.order_id, r.at.slice(0, 10)]));
   const segments = [
+    segment('pickup', 'Listos y sin recoger (3+ días)', 'Llamar para que lo recoja (aviso de servicio)',
+      all.filter(o => o.status === 'Listo' && listoSince.has(o.id) && daysBetween(listoSince.get(o.id), today) >= 3)
+        .sort((a, b) => listoSince.get(a.id).localeCompare(listoSince.get(b.id)))
+        .map(o => ({ ...row(o, `Listo hace ${daysBetween(listoSince.get(o.id), today)} días · ${o.ticket}${o.price ? ' · $' + o.price : ''}`), date: listoSince.get(o.id) })),
+      { transactional: true }),
     segment('review', 'Entregados en los últimos 14 días', 'Pedir reseña en Google',
       all.filter(o => between(o.delivered_day, addDays(today, -13), today) && o.warranty_result !== 'No cubierta')
         .map(o => row(o, 'Entregado'))),
@@ -1021,11 +1081,7 @@ app.get('/api/insights', staffRateLimit, requireAuth, (req, res) => {
   const labelCounts = new Map();
   for (const o of all) {
     const mk = modelKey(o);
-    // "iPhone 13" ya trae la marca; "S23" no: se le antepone el tipo.
-    const model = o.model.trim();
-    const hasBrand = o.device_type === 'Otro' ||
-      stripAccents(model.toLowerCase()).startsWith(stripAccents(o.device_type.toLowerCase()));
-    const label = hasBrand ? model : `${o.device_type} ${model}`;
+    const label = displayModel(o);
     const counts = labelCounts.get(mk) || new Map();
     counts.set(label, (counts.get(label) || 0) + 1);
     labelCounts.set(mk, counts);
@@ -1428,7 +1484,12 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ error: status === 500 ? 'Error interno del servidor.' : (err.message || 'Error.') });
 });
 
-app.listen(PORT, () => {
-  console.log(`Órdenes de Reparación corriendo en http://localhost:${PORT}`);
-  console.log(`Modo: ${process.env.NODE_ENV || 'development'}`);
-});
+// NO_LISTEN=1: solo prepara la base (lo usa seed-demo.js), sin abrir el puerto.
+if (process.env.NO_LISTEN !== '1') {
+  app.listen(PORT, () => {
+    console.log(`Órdenes de Reparación corriendo en http://localhost:${PORT}`);
+    console.log(`Modo: ${process.env.NODE_ENV || 'development'}`);
+    if (process.env.DB_FILE) console.log(`Base de datos: ${DB_FILE}`);
+  });
+}
+module.exports = { db, DB_FILE, generateCustomerCode, WARRANTY_DAYS, TECHNICIANS, STATUSES };

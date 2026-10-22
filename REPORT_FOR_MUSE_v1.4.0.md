@@ -52,6 +52,31 @@ The three existing test orders `GH-0003`, `GH-0004`, `GH-0005` (customer names s
 
 ---
 
+## 2b. Demo mode — the owner wants to see a simulated shop in Chrome
+
+All data so far is fake, and the owner wants to explore the app with months of realistic history (repeat customers, warranties, unpicked devices…). `backend/seed-demo.js` builds that in a **separate file `backend/demo.db`**; the real `repairshop.db` is never touched.
+
+```bash
+cd /path/to/TrackingGHphones/backend
+# Create the simulated shop (180 days, ~1,400 orders, ~1,000 customers, ~40 warranty claims).
+# Use the same login the owner already uses, so nothing new to remember:
+node --env-file=.env seed-demo.js          # takes ADMIN_USER / ADMIN_PASSWORD from .env
+#   (without .env: ADMIN_USER=... ADMIN_PASSWORD=... node seed-demo.js; default is demo / demo1234)
+#   Re-generate from scratch later with:  node --env-file=.env seed-demo.js --reset
+```
+
+Then restart the app pointing at the demo DB (same URL, `http://193.122.140.38:3000`):
+
+| How the app runs | Switch to demo | Switch back to real data |
+|---|---|---|
+| pm2 | `DB_FILE=demo.db pm2 restart <app> --update-env` | `DB_FILE=repairshop.db pm2 restart <app> --update-env` (set it explicitly: pm2 may keep an old value) |
+| systemd | add `Environment=DB_FILE=demo.db` to the unit, `daemon-reload`, restart | remove the line, `daemon-reload`, restart |
+| plain shell | stop it, then `DB_FILE=demo.db npm start` | stop it, then `npm start` |
+
+On start the log prints `Base de datos: /…/demo.db` when `DB_FILE` is set. Safety built into the script: refuses `repairshop.db` even with `--reset`; refuses to overwrite a demo that already has orders unless `--reset`; every phone uses the reserved fictional range `NNN-555-0100…0199`; every agreement starts with `DEMO`; deterministic output. `demo.db` is git-ignored (`*.db`).
+
+---
+
 ## 3. What changed
 
 ### 3.1 Timezone fix (backend/server.js, top of file)
@@ -105,7 +130,16 @@ Current period vs. the previous period of the same length.
 - All CSV exports prefix values starting with `= + - @` with `'` (Excel formula injection).
 - Password input styled (`input[type="password"]` was missing from the base input rule).
 
-### 3.6 Files
+### 3.6 Counter, search and paging (found by running the simulated shop)
+- `GET /api/customers/lookup?phone=` (auth): matches the last 10 digits in any format, returns name, visits, spent, **open orders** and **orders still in warranty** (excluding ones that already have an open claim). Intake shows it under the phone field with "Abrir garantía" / "Ver" / "Usar sus datos" buttons.
+- `GET /api/orders` search moved from SQL `LIKE` to JS: accent/case-insensitive, and phone digits match any format (`2395550108`, `(239) 555-0108`). Two-phase query (light candidate scan → full rows only for the page).
+- Paging: `?limit=&offset=` + `X-Total-Count` header. UI loads 50 at a time ("Mostrar más"), keeps the page after advance/edit/delete, 250 ms debounce on search. Without `limit` it returns everything (CSV export).
+- Insights: new transactional segment `pickup` ("Listos y sin recoger 3+ días") — a service reminder, so contactable = has phone (no opt-in needed). Model labels no longer duplicate the brand ("iPhone iPhone 11").
+- `DB_FILE` env var selects the SQLite file; `NO_LISTEN=1` prepares the DB without opening the port (used by the seed). `server.js` now `module.exports` a few internals for the seed script.
+
+Simulated-shop results that drove these changes (1,418 orders): phone search in another format returned 0 of 3; "Carmen Diaz" returned 0 (stored "Díaz"); a returning customer with an active warranty could be charged as a new paid order with no warning; 77 devices "Listo" for 30+ days with no reminder list; `/api/orders` returned 1 MB per load. All fixed and re-verified.
+
+### 3.7 Files
 | File | Change |
 |---|---|
 | `backend/server.js` | TZ, migrations, warranty helpers + endpoint, price/opt-in, `/api/insights` |
@@ -113,6 +147,7 @@ Current period vs. the previous period of the same length.
 | `frontend/index.html` | dashboard tabs/money panel, warranty modal, new form fields |
 | `frontend/styles.css` | styles for all of the above, password field, bar label wrap fix |
 | `backend/package.json` | version 1.4.0 (no dependency changes) |
+| `backend/seed-demo.js` | new: simulated shop generator |
 | `CHANGELOG.md`, `MIGRATIONS.md`, `README.md` | docs |
 
 ---
@@ -136,6 +171,7 @@ Each `ALTER` runs only if the column is missing (checked with `PRAGMA table_info
 | Var | Default | Meaning |
 |---|---|---|
 | `TZ` | `America/New_York` | Shop timezone |
+| `DB_FILE` | `repairshop.db` | SQLite file (e.g. `demo.db` for the simulated shop) |
 | `WARRANTY_DAYS` | `60` | Warranty length in days |
 
 ---
@@ -143,6 +179,7 @@ Each `ALTER` runs only if the column is missing (checked with `PRAGMA table_info
 ## 6. How it was tested (in Claude's sandbox)
 - **37 end-to-end API checks** on a real server instance and real SQLite DB: price/opt-in validation, local time, warranty Cubierta / No cubierta / Vencida (delivery moved 70 days back), duplicate-claim and not-delivered refusals, field injection ignored, history, public lookup, edit preserving fields, insights numbers (revenue, open money, customer merge across phone formats, segments, parts demand, warranty return rate, model merge), auth required on new endpoints. **All passed.**
 - **Migration test:** DB created and populated by the v1.3.0 `server.js` from `main`, then started with v1.4.0: old order readable, warranty date computed from its real delivery, claim opened, insights OK, clean log.
+- **Simulated shop:** 1,418 orders / 180 days; scenario script (repeat customer by phone formats, accents, active-warranty detection, paging, pickup list, insights sanity, auth on the new endpoint). All endpoints < 210 ms on that dataset.
 - **Visual test** with headless Chromium at 1280 px and 390 px (phone): every new screen, no console/CSP errors.
 - Limitation: the sandbox could not reach the npm registry, so tests ran against a minimal Express-compatible test double (routing, JSON, static). `express` itself and `package-lock.json` are unchanged from v1.3.0. Please confirm the app starts normally after `npm ci` on the server.
 

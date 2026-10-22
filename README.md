@@ -87,6 +87,22 @@ Abre **http://localhost:3000** e inicia sesión con tu usuario de `.env`.
 - Sin `ADMIN_USER`/`ADMIN_PASSWORD` el servidor arranca igual pero sin usuarios (verás el aviso en consola).
 - Sesiones de 12 h en cookie httpOnly; `POST /api/change-password` cambia la clave (mínimo 8 caracteres).
 
+## Taller simulado (datos de prueba)
+
+Para probar la app con meses de datos realistas **sin clientes reales**:
+
+```bash
+cd backend
+node seed-demo.js            # crea demo.db (180 días). --days 90 para menos, --reset para rehacerla
+DB_FILE=demo.db node server.js
+# PowerShell: $env:DB_FILE="demo.db"; node server.js
+```
+
+Entra con `demo` / `demo1234` (o con `ADMIN_USER`/`ADMIN_PASSWORD` si los definiste al crear la demo).
+El script nunca escribe en `repairshop.db`, se niega a sobrescribir una demo con órdenes sin `--reset`,
+y todos los teléfonos usan el rango ficticio 555-0100…0199. Para volver a los datos reales, inicia el
+servidor sin `DB_FILE`.
+
 ## Panel e interpretación de métricas
 
 El panel usa datos de órdenes y del historial local de estados. No inventa asignaciones antiguas. Las fechas "hoy" y los cortes de fecha usan la zona horaria del taller (`America/New_York` por defecto; se cambia con la variable `TZ`).
@@ -135,7 +151,7 @@ WAL sidecar files (`repairshop.db-wal`, `repairshop.db-shm`) are recreated autom
 
 | Method | Endpoint                  | Description                              |
 |--------|---------------------------|------------------------------------------|
-| GET    | `/api/orders`             | List orders (`search`, `status`, `from`, `to`, `technician`, `device_type`, `problem`, aging/pickup buckets, completed technician/date) |
+| GET    | `/api/orders`             | List orders (`limit`/`offset` paging with `X-Total-Count`; accent-insensitive `search`, phone in any format, `status`, `from`, `to`, `technician`, `device_type`, `problem`, aging/pickup buckets, completed technician/date) |
 | GET    | `/api/dashboard`          | Authenticated KPI and chart data (`from`, `to`, `status`, `technician`, `device_type`, `interval`) |
 | POST   | `/api/orders`             | Create order (validates required fields) |
 | GET    | `/api/track/:code`        | Public customer status lookup by unguessable code (minimal fields, rate-limited) |
@@ -146,6 +162,7 @@ WAL sidecar files (`repairshop.db-wal`, `repairshop.db-shm`) are recreated autom
 | GET    | `/api/orders/:id/history` | Status and technician assignment events |
 | POST   | `/api/orders/:id/warranty`| Open a warranty claim for a delivered order (`problems`, `diagnostic_note`, `cause`: `fabrica`/`cliente`, `agreement`, optional `arrival_condition`, `assigned_technician`, `promised_at`, `price`) |
 | GET    | `/api/insights`           | Customers, marketing segments, parts/stock and money pipeline (`from`, `to`) |
+| GET    | `/api/customers/lookup`   | Returning-customer lookup by phone (`phone`): visits, open orders, orders in warranty |
 
 ## Notes
 
