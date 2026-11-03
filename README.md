@@ -2,7 +2,7 @@
 
 Repair order management web app for phone and electronics shops — fast intake, status tracking, and ticket lookup.
 
-Built for **Geeks Hollywood** (4514 Hollywood Blvd, Hollywood, FL · (754) 888-9631).
+Built for **Geeks Hollywood** (4514 Hollywood Blvd
 
 ## Features
 
