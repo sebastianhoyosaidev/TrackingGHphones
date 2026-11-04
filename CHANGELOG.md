@@ -25,6 +25,9 @@ Probado con `demo.db` de 2 años (5.794 órdenes, `seed-demo.js --days 730`).
   demás peticiones mientras se verifica una clave.
 - **Panel en el navegador**: cancela la petición anterior (panel e insights)
   si se vuelve a pedir.
+- **Limitador de peticiones**: guarda como máximo `max + 1` marcas por IP.
+  Bloquea exactamente igual (600.000 decisiones simuladas idénticas), pero un
+  bombardeo de 50.000 peticiones pasa de ~20 s de trabajo a ~6 ms.
 - Se quitan los espacios reservados de la mascota Blu.
 
 ## v1.4.0 — 2026-10-22 — Garantías, dinero por entrar y panel de clientes, marketing y repuestos
