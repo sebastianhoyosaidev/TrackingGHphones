@@ -624,6 +624,9 @@ document.getElementById('lookup-ticket').addEventListener('keydown', (e) => {
 // Fluido: filtros se aplican solos, el contenido anterior se mantiene visible
 // mientras carga y se ignoran respuestas viejas si el usuario cambia rápido.
 let dashboardSeq = 0;
+// La petición anterior del panel se cancela si se pide otra (clics seguidos
+// o el refresco automático): el servidor no trabaja de más.
+let dashboardAbort = null;
 let dashboardTimer = null;
 let insightsData = null;
 function scheduleDashboard() {
@@ -687,6 +690,9 @@ function updateDeviceOptions(deviceTypes) {
 async function loadDashboard(opts) {
   const silent = !!(opts && opts.silent === true); // refresco automático: sin "Actualizando…"
   const seq = ++dashboardSeq;
+  if (dashboardAbort) dashboardAbort.abort();
+  dashboardAbort = new AbortController();
+  const signal = dashboardAbort.signal;
   const state = document.getElementById('dashboard-state');
   const content = document.getElementById('dashboard-content');
   const firstLoad = content.classList.contains('hidden');
@@ -698,8 +704,8 @@ async function loadDashboard(opts) {
   try {
     const range = new URLSearchParams({ from: document.getElementById('dash-from').value, to: document.getElementById('dash-to').value });
     const [dashRes, insRes] = await Promise.all([
-      api('/api/dashboard?' + dashboardQuery()),
-      api('/api/insights?' + range)
+      api('/api/dashboard?' + dashboardQuery(), { signal }),
+      api('/api/insights?' + range, { signal })
     ]);
     if (seq !== dashboardSeq) return; // llegó una respuesta vieja: se ignora
     if (dashRes.status === 401 || insRes.status === 401) return sessionExpired();

@@ -268,6 +268,17 @@ if (!orderCols.includes('warranty_reason')) {
   db.exec('ALTER TABLE orders ADD COLUMN warranty_reason TEXT');
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_warranty_of ON orders(warranty_of)');
+// Índices de rendimiento (se crean una sola vez; no cambian datos). Los "de
+// cobertura" llevan las columnas que el panel lee, así SQLite responde desde
+// el índice sin abrir cada fila.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_orders_created_cover ON orders(created_at, status, device_type, assigned_technician);
+  CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+  CREATE INDEX IF NOT EXISTS idx_orders_technician ON orders(assigned_technician, device_type);
+  CREATE INDEX IF NOT EXISTS idx_orders_device ON orders(device_type);
+  CREATE INDEX IF NOT EXISTS idx_order_events_order_status ON order_events(order_id, event_type, to_status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_order_events_status_date_cover ON order_events(event_type, to_status, created_at, order_id, assigned_technician);
+`);
 // Panel (v1.4.0): precio acordado (opcional) y permiso de marketing del cliente.
 if (!orderCols.includes('price')) {
   db.exec('ALTER TABLE orders ADD COLUMN price REAL');
@@ -296,7 +307,11 @@ withTransaction(() => {
     DELETE FROM order_events
     WHERE source_audit_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM order_events o
-      WHERE o.id <> order_events.id AND o.source_audit_id IS NULL
+      -- "+o.source_audit_id": el "+" evita que SQLite use el índice de
+      -- source_audit_id (que aquí revisa casi toda la tabla por cada fila) y
+      -- usa el de order_id. Mismo resultado; el arranque pasa de ~35 s a
+      -- milisegundos con 5.800 órdenes.
+      WHERE o.id <> order_events.id AND +o.source_audit_id IS NULL
         AND o.order_id = order_events.order_id AND o.event_type = 'status'
         AND COALESCE(o.from_status, '') = COALESCE(order_events.from_status, '')
         AND o.to_status = order_events.to_status AND o.created_at = order_events.created_at
@@ -350,10 +365,18 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
   return `${salt}:${hash}`;
 }
-function verifyPassword(password, stored) {
+// Versiones asíncronas para las rutas: scrypt corre en el pool de hilos de
+// Node y no congela al resto de peticiones mientras se verifica una clave.
+const scryptAsync = (password, salt) => new Promise((resolve, reject) =>
+  crypto.scrypt(password, salt, 64, (err, key) => (err ? reject(err) : resolve(key))));
+async function hashPasswordAsync(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return `${salt}:${(await scryptAsync(password, salt)).toString('hex')}`;
+}
+async function verifyPassword(password, stored) {
   const parts = String(stored).split(':');
   if (parts.length !== 2) return false;
-  const check = crypto.scryptSync(password, parts[0], 64);
+  const check = await scryptAsync(password, parts[0]);
   const expected = Buffer.from(parts[1], 'hex');
   return check.length === expected.length && crypto.timingSafeEqual(check, expected);
 }
@@ -451,7 +474,8 @@ app.get('/api/config', (req, res) => {
   res.json({ devMode: process.env.NODE_ENV !== 'production' });
 });
 
-app.post('/api/login', loginRateLimit, (req, res) => {
+app.post('/api/login', loginRateLimit, async (req, res, next) => {
+  try {
   const { username, password } = req.body || {};
   if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
     return res.status(401).json({ error: 'Credenciales inválidas.' });
@@ -461,16 +485,17 @@ app.post('/api/login', loginRateLimit, (req, res) => {
     // B-4: corre un scrypt dummy con salt aleatoria para que el tiempo de
     // respuesta no revele si el usuario existe (antes se respondía más
     // rápido al no pasar por scrypt). Mensaje genérico igual que abajo.
-    crypto.scryptSync(password, crypto.randomBytes(16), 64);
+    await scryptAsync(password, crypto.randomBytes(16));
     return res.status(401).json({ error: 'Credenciales inválidas.' });
   }
   // Mensaje genérico a propósito: no revela si el usuario existe.
-  if (!verifyPassword(password, user.password_hash)) {
+  if (!(await verifyPassword(password, user.password_hash))) {
     return res.status(401).json({ error: 'Credenciales inválidas.' });
   }
   const token = createSession(user.id, user.username);
   setSessionCookie(req, res, token);
   res.json({ ok: true, username: user.username });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/logout', (req, res) => {
@@ -489,21 +514,24 @@ app.get('/api/me', (req, res) => {
   res.json({ username: user.username });
 });
 
-app.post('/api/change-password', requireAuth, (req, res) => {
+app.post('/api/change-password', requireAuth, async (req, res, next) => {
+  try {
   const { currentPassword, newPassword } = req.body || {};
   if (typeof newPassword !== 'string' || newPassword.length < 8) {
     return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 8 caracteres.' });
   }
   const user = db.prepare('SELECT * FROM staff_users WHERE id = ?').get(req.staffUser.id);
-  if (!user || !verifyPassword(currentPassword || '', user.password_hash)) {
+  if (!user || !(await verifyPassword(typeof currentPassword === 'string' ? currentPassword : '', user.password_hash))) {
     return res.status(401).json({ error: 'Credenciales inválidas.' });
   }
-  db.prepare('UPDATE staff_users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), user.id);
+  const newHash = await hashPasswordAsync(newPassword);
+  db.prepare('UPDATE staff_users SET password_hash = ? WHERE id = ?').run(newHash, user.id);
   // Revoca todas las sesiones y emite una fresca.
   db.prepare('DELETE FROM staff_sessions WHERE user_id = ?').run(user.id);
   const token = createSession(user.id, user.username);
   setSessionCookie(req, res, token);
   res.json({ ok: true });
+  } catch (error) { next(error); }
 });
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sin 0/O/1/I/L para evitar confusiones
@@ -714,11 +742,13 @@ function readOrderFilters(query) {
 function buildOrderWhere(filters) {
   const clauses = [];
   const params = [];
-  if (filters.from) { clauses.push('date(created_at) >= date(?)'); params.push(filters.from); }
-  if (filters.to) { clauses.push('date(created_at) <= date(?)'); params.push(filters.to); }
-  if (filters.status) { clauses.push('status = ?'); params.push(filters.status); }
-  if (filters.technician) { clauses.push('assigned_technician = ?'); params.push(filters.technician); }
-  if (filters.deviceType) { clauses.push('device_type = ?'); params.push(filters.deviceType); }
+  // Comparación directa sobre created_at ('AAAA-MM-DD HH:MM:SS') en vez de
+  // date(created_at): mismo resultado y así usa el índice.
+  if (filters.from) { clauses.push('orders.created_at >= ?'); params.push(filters.from); }
+  if (filters.to) { clauses.push("orders.created_at < date(?, '+1 day')"); params.push(filters.to); }
+  if (filters.status) { clauses.push('orders.status = ?'); params.push(filters.status); }
+  if (filters.technician) { clauses.push('orders.assigned_technician = ?'); params.push(filters.technician); }
+  if (filters.deviceType) { clauses.push('orders.device_type = ?'); params.push(filters.deviceType); }
   if (filters.problem) { clauses.push("EXISTS (SELECT 1 FROM json_each(orders.problems) WHERE value = ?)"); params.push(filters.problem); }
   if (filters.openOnly) clauses.push("orders.status <> 'Entregado'");
   if (filters.unassignedOnly) clauses.push('orders.assigned_technician IS NULL');
@@ -752,17 +782,25 @@ function buildOrderWhere(filters) {
     }
   }
   if (filters.completedTechnician || filters.completedFrom || filters.completedTo || filters.completedUnassigned) {
-    clauses.push(`EXISTS (SELECT 1 FROM order_events e WHERE e.order_id = orders.id
-      AND e.event_type = 'status' AND e.to_status = 'Entregado'
-      AND (? = '' OR e.assigned_technician = ?)
-      AND (? = 0 OR e.assigned_technician IS NULL)
-      AND (? = '' OR date(e.created_at) >= date(?))
-      AND (? = '' OR date(e.created_at) <= date(?)))`);
-    params.push(filters.completedTechnician, filters.completedTechnician,
-      filters.completedUnassigned ? 1 : 0,
-      filters.completedFrom, filters.completedFrom, filters.completedTo, filters.completedTo);
+    // "Órdenes con una entrega que cumpla esto": se arma una sola vez la lista
+    // de entregas que cumplen (usa el índice por fecha) en vez de buscar orden
+    // por orden. Mismo resultado que el EXISTS anterior.
+    const sub = ["e.event_type = 'status'", "e.to_status = 'Entregado'"];
+    if (filters.completedTechnician) { sub.push('e.assigned_technician = ?'); params.push(filters.completedTechnician); }
+    if (filters.completedUnassigned) sub.push('e.assigned_technician IS NULL');
+    if (filters.completedFrom) { sub.push('e.created_at >= ?'); params.push(filters.completedFrom); }
+    if (filters.completedTo) { sub.push("e.created_at < date(?, '+1 day')"); params.push(filters.completedTo); }
+    clauses.push(`orders.id IN (SELECT e.order_id FROM order_events e WHERE ${sub.join(' AND ')})`);
   }
   return { sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+// Agrega una condición más a un WHERE ya armado (o lo empieza).
+function andWhere(where, clause, ...params) {
+  return {
+    sql: where.sql ? `${where.sql} AND ${clause}` : ` WHERE ${clause}`,
+    params: [...where.params, ...params],
+  };
 }
 
 // Texto normalizado para buscar: sin tildes, minúsculas, espacios simples.
@@ -845,23 +883,26 @@ function localDateOnly(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+// Formateadores creados una sola vez (crear uno por fecha es lento).
+const LABEL_MONTH_YEAR = new Intl.DateTimeFormat('es-US', { month: 'short', year: '2-digit' });
+const LABEL_MONTH_DAY = new Intl.DateTimeFormat('es-US', { month: 'short', day: 'numeric' });
 function dateBucket(dateValue, interval) {
   const date = new Date(`${dateValue.slice(0, 10)}T12:00:00`);
   if (Number.isNaN(date.getTime())) return null;
   const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   if (interval === 'month') {
     const start = new Date(date.getFullYear(), date.getMonth(), 1);
-    return { key: fmt(start), label: start.toLocaleDateString('es-US', { month: 'short', year: '2-digit' }),
+    return { key: fmt(start), label: LABEL_MONTH_YEAR.format(start),
       from: fmt(start), to: fmt(new Date(date.getFullYear(), date.getMonth() + 1, 0)), value: 0 };
   }
   if (interval === 'week') {
     const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
     start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
     const end = new Date(start); end.setDate(end.getDate() + 6);
-    return { key: fmt(start), label: `${start.toLocaleDateString('es-US', { month: 'short', day: 'numeric' })}–${end.toLocaleDateString('es-US', { month: 'short', day: 'numeric' })}`,
+    return { key: fmt(start), label: `${LABEL_MONTH_DAY.format(start)}–${LABEL_MONTH_DAY.format(end)}`,
       from: fmt(start), to: fmt(end), value: 0 };
   }
-  return { key: fmt(date), label: date.toLocaleDateString('es-US', { month: 'short', day: 'numeric' }),
+  return { key: fmt(date), label: LABEL_MONTH_DAY.format(date),
     from: fmt(date), to: fmt(date), value: 0 };
 }
 
@@ -875,81 +916,86 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
     return res.status(400).json({ error: 'El inicio del período debe ser anterior al final.' });
   }
   const interval = ['day', 'week', 'month'].includes(req.query.interval) ? req.query.interval : 'day';
+  // categoryWhere: mismos filtros sin el rango de fechas (estado actual del
+  // taller). rangeWhere: con el rango de fechas (gráficas del período).
   const categoryWhere = buildOrderWhere({ ...filters, from: '', to: '' });
   const rangeWhere = buildOrderWhere(filters);
-  const categoryOrders = db.prepare('SELECT * FROM orders' + categoryWhere.sql).all(...categoryWhere.params);
-  const rangeOrders = db.prepare('SELECT * FROM orders' + rangeWhere.sql).all(...rangeWhere.params);
   const today = db.prepare("SELECT date('now', 'localtime') AS today").get().today;
   const now = Date.now();
   const dateMs = value => Date.parse(String(value || '').replace(' ', 'T'));
   const ageDays = order => Math.max(0, (now - dateMs(order.created_at)) / 86400000);
-  const openOrders = categoryOrders.filter(o => o.status !== 'Entregado');
-  const readyOrders = categoryOrders.filter(o => o.status === 'Listo');
-  const latestReady = new Map();
-  for (const event of db.prepare(`
-    SELECT e.order_id, e.created_at FROM order_events e
-    WHERE e.event_type = 'status' AND e.to_status = 'Listo'
-    ORDER BY e.created_at DESC, e.id DESC
-  `).all()) {
-    if (!latestReady.has(event.order_id)) latestReady.set(event.order_id, event.created_at);
-  }
-  const pickupHours = order => latestReady.has(order.id)
-    ? Math.max(0, (now - dateMs(latestReady.get(order.id))) / 3600000) : null;
 
-  const deliveredSql = `
-    SELECT COUNT(*) AS n FROM order_events e JOIN orders o ON o.id = e.order_id
-    WHERE e.event_type = 'status' AND e.to_status = 'Entregado'
-      AND date(e.created_at) = date('now', 'localtime')
-      AND (? = '' OR e.assigned_technician = ?)
-      AND (? = '' OR o.device_type = ?)
-      AND (? = '' OR o.status = ?)
-      AND (? = '' OR EXISTS (SELECT 1 FROM json_each(o.problems) WHERE value = ?))
-  `;
-  const deliveredToday = db.prepare(deliveredSql).get(
-    filters.technician, filters.technician, filters.deviceType, filters.deviceType,
-    filters.status, filters.status, filters.problem, filters.problem
-  ).n;
+  // Solo se cargan las órdenes ABIERTAS (lo que hay hoy en el taller), no todo
+  // el historial. Para las que están Listo se trae cuándo quedaron listas.
+  const openWhere = andWhere(categoryWhere, "orders.status <> 'Entregado'");
+  const openOrders = db.prepare(`
+    SELECT orders.id, orders.status, orders.created_at, orders.assigned_technician, orders.promised_at,
+      CASE WHEN orders.status = 'Listo' THEN (
+        SELECT MAX(e.created_at) FROM order_events e
+        WHERE e.order_id = orders.id AND e.event_type = 'status' AND e.to_status = 'Listo'
+      ) END AS ready_at
+    FROM orders` + openWhere.sql).all(...openWhere.params);
+  const pickupHours = order => order.ready_at ? Math.max(0, (now - dateMs(order.ready_at)) / 3600000) : null;
+  const createdTodayWhere = andWhere(categoryWhere, "orders.created_at >= ? AND orders.created_at < date(?, '+1 day')", today, today);
+  const createdToday = db.prepare('SELECT COUNT(*) AS n FROM orders' + createdTodayWhere.sql).get(...createdTodayWhere.params).n;
 
+  // Entregadas hoy (por la fecha del evento de entrega).
+  const deliveredClauses = ["e.event_type = 'status'", "e.to_status = 'Entregado'",
+    'e.created_at >= ?', "e.created_at < date(?, '+1 day')"];
+  const deliveredParams = [today, today];
+  if (filters.technician) { deliveredClauses.push('e.assigned_technician = ?'); deliveredParams.push(filters.technician); }
+  if (filters.deviceType) { deliveredClauses.push('o.device_type = ?'); deliveredParams.push(filters.deviceType); }
+  if (filters.status) { deliveredClauses.push('o.status = ?'); deliveredParams.push(filters.status); }
+  if (filters.problem) { deliveredClauses.push('EXISTS (SELECT 1 FROM json_each(o.problems) WHERE value = ?)'); deliveredParams.push(filters.problem); }
+  const deliveredToday = db.prepare(`SELECT COUNT(*) AS n FROM order_events e JOIN orders o ON o.id = e.order_id
+    WHERE ${deliveredClauses.join(' AND ')}`).get(...deliveredParams).n;
+
+  // Gráficas del período: los conteos los hace SQLite (GROUP BY). Los empates
+  // se ordenan por primera aparición, igual que antes.
   const byCreated = new Map();
-  for (const order of rangeOrders) {
-    const bucket = dateBucket(order.created_at, interval);
+  for (const row of db.prepare(`SELECT substr(orders.created_at, 1, 10) AS day, COUNT(*) AS n
+      FROM orders${rangeWhere.sql} GROUP BY day`).all(...rangeWhere.params)) {
+    const bucket = dateBucket(row.day, interval);
     if (bucket) {
       const found = byCreated.get(bucket.key) || bucket;
-      found.value++;
+      found.value += row.n;
       byCreated.set(bucket.key, found);
     }
   }
-  const completedQuery = db.prepare(`
-    SELECT e.*, o.created_at AS order_created_at, o.device_type, o.problems
-    FROM order_events e JOIN orders o ON o.id = e.order_id
-    WHERE e.event_type = 'status' AND e.to_status = 'Entregado'
-      AND (? = '' OR date(e.created_at) >= date(?))
-      AND (? = '' OR date(e.created_at) <= date(?))
-      AND (? = '' OR o.device_type = ?)
-  `);
-  const completed = completedQuery.all(filters.from, filters.from, filters.to, filters.to,
-    filters.deviceType, filters.deviceType).filter(e => {
-      if (filters.status && filters.status !== 'Entregado') return false;
-      if (filters.technician && e.assigned_technician !== filters.technician) return false;
-      if (filters.problem && !JSON.parse(e.problems || '[]').includes(filters.problem)) return false;
-      return true;
-    });
-  // Tiempo de REPARACIÓN = de recibido a la primera vez que quedó "Listo".
-  // (Antes se medía hasta "Entregado", lo que sumaba los días que el equipo
-  // esperaba a que el cliente lo recogiera.) La espera de recogida se mide
-  // aparte: de "Listo" a "Entregado". Horas de calendario (incluye noches).
-  const firstListo = new Map();
-  for (const ev of db.prepare(`SELECT order_id, MIN(created_at) AS at FROM order_events
-      WHERE event_type = 'status' AND to_status = 'Listo' GROUP BY order_id`).all()) {
-    firstListo.set(ev.order_id, ev.at);
+  const statusCounts = new Map(db.prepare(`SELECT orders.status AS label, COUNT(*) AS n
+      FROM orders${rangeWhere.sql} GROUP BY orders.status`).all(...rangeWhere.params).map(r => [r.label, r.n]));
+  const sortedCounts = rows => rows.filter(r => r.label).map(r => ({ label: r.label, value: r.value }))
+    .sort((x, y) => y.value - x.value);
+  const devices = sortedCounts(db.prepare(`SELECT orders.device_type AS label, COUNT(*) AS value, MIN(orders.id) AS first
+      FROM orders${rangeWhere.sql} GROUP BY orders.device_type ORDER BY first`).all(...rangeWhere.params));
+  const issues = sortedCounts(db.prepare(`SELECT p.value AS label, COUNT(*) AS value, MIN(orders.id * 1000 + p.key) AS first
+      FROM orders JOIN json_each(orders.problems) p${rangeWhere.sql} GROUP BY p.value ORDER BY first`)
+    .all(...rangeWhere.params)).slice(0, 10);
+
+  // Entregas del período. Tiempo de REPARACIÓN = de recibido a la primera vez
+  // que quedó "Listo" (sin "Listo": hasta la entrega). La espera de recogida se
+  // mide aparte: de "Listo" a "Entregado". Horas de calendario (incluye
+  // noches). Los filtros van en SQL y solo se leen las columnas necesarias.
+  let completed = [];
+  if (!filters.status || filters.status === 'Entregado') {
+    const clauses = ["e.event_type = 'status'", "e.to_status = 'Entregado'"];
+    const params = [];
+    if (filters.from) { clauses.push('e.created_at >= ?'); params.push(filters.from); }
+    if (filters.to) { clauses.push("e.created_at < date(?, '+1 day')"); params.push(filters.to); }
+    if (filters.deviceType) { clauses.push('o.device_type = ?'); params.push(filters.deviceType); }
+    if (filters.technician) { clauses.push('e.assigned_technician = ?'); params.push(filters.technician); }
+    if (filters.problem) { clauses.push('EXISTS (SELECT 1 FROM json_each(o.problems) WHERE value = ?)'); params.push(filters.problem); }
+    completed = db.prepare(`SELECT e.assigned_technician, e.created_at, o.created_at AS order_created_at,
+        (SELECT MIN(l.created_at) FROM order_events l
+          WHERE l.order_id = e.order_id AND l.event_type = 'status' AND l.to_status = 'Listo') AS first_listo
+      FROM order_events e JOIN orders o ON o.id = e.order_id WHERE ${clauses.join(' AND ')}`).all(...params);
   }
   const turnaround = completed.map(e => {
-    const listo = firstListo.get(e.order_id);
-    const end = listo || e.created_at; // sin paso por "Listo": se usa la entrega
+    const end = e.first_listo || e.created_at; // sin paso por "Listo": se usa la entrega
     return {
       technician: e.assigned_technician,
       hours: Math.max(0, (dateMs(end) - dateMs(e.order_created_at)) / 3600000),
-      pickupHours: listo ? Math.max(0, (dateMs(e.created_at) - dateMs(listo)) / 3600000) : null,
+      pickupHours: e.first_listo ? Math.max(0, (dateMs(e.created_at) - dateMs(e.first_listo)) / 3600000) : null,
     };
   });
   const median = values => {
@@ -958,33 +1004,55 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
     return sorted.length % 2 ? sorted[(sorted.length - 1) / 2] :
       (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
   };
-  const countBy = (rows, valueOf) => {
-    const counts = new Map();
-    for (const row of rows) {
-      const label = valueOf(row);
-      if (label) counts.set(label, (counts.get(label) || 0) + 1);
-    }
-    return [...counts].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
-  };
-  const statuses = STATUSES.map(label => ({ label, value: rangeOrders.filter(o => o.status === label).length }));
-  const technicians = TECHNICIANS.map(label => ({
-    label, value: openOrders.filter(o => o.assigned_technician === label).length,
-    completed: completed.filter(e => e.assigned_technician === label).length,
-  }));
-  technicians.push({ label: 'Sin asignar', value: openOrders.filter(o => !o.assigned_technician).length,
-    completed: completed.filter(e => !e.assigned_technician).length });
-  const aging = [
+  const statuses = STATUSES.map(label => ({ label, value: statusCounts.get(label) || 0 }));
+
+  // Un solo recorrido por las abiertas y otro por las entregas: todos los
+  // conteos a la vez, en vez de filtrar la lista una vez por cada barra.
+  const AGING = [
     { label: '0–1 días', min: 0, max: 2 }, { label: '2–3 días', min: 2, max: 4 },
     { label: '4–7 días', min: 4, max: 8 }, { label: '8+ días', min: 8, max: Infinity },
-  ].map(b => ({ label: b.label, value: openOrders.filter(o => ageDays(o) >= b.min && ageDays(o) < b.max).length }));
-  const pickupWaiting = [
+  ];
+  const PICKUP = [
     { label: '<24 h', min: 0, max: 24 }, { label: '1–2 días', min: 24, max: 48 },
     { label: '2–3 días', min: 48, max: 72 }, { label: '3+ días', min: 72, max: Infinity },
-  ].map(b => ({ label: b.label, value: readyOrders.filter(o => {
-    const hours = pickupHours(o); return hours !== null && hours >= b.min && hours < b.max;
-  }).length }));
+  ];
+  const UNASSIGNED = 'Sin asignar';
+  const techKey = name => (name ? name : UNASSIGNED);
+  const openByTech = new Map(), completedByTech = new Map(), hoursByTech = new Map();
+  const agingCounts = AGING.map(() => 0), pickupCounts = PICKUP.map(() => 0);
+  const counts = { inRepair: 0, ready: 0, aging: 0, overdue: 0, waitingPickup: 0 };
+  for (const o of openOrders) {
+    const key = techKey(o.assigned_technician);
+    openByTech.set(key, (openByTech.get(key) || 0) + 1);
+    const age = ageDays(o);
+    const ai = AGING.findIndex(b => age >= b.min && age < b.max);
+    if (ai >= 0) agingCounts[ai]++;
+    if (age >= 3) counts.aging++;
+    if (o.status === 'En reparación') counts.inRepair++;
+    if (o.promised_at && o.promised_at < today) counts.overdue++;
+    if (o.status === 'Listo') {
+      counts.ready++;
+      const hours = pickupHours(o);
+      if (hours !== null) {
+        const pi = PICKUP.findIndex(b => hours >= b.min && hours < b.max);
+        if (pi >= 0) pickupCounts[pi]++;
+      }
+      if ((hours || 0) >= 48) counts.waitingPickup++;
+    }
+  }
+  for (const t of turnaround) {
+    const key = techKey(t.technician);
+    completedByTech.set(key, (completedByTech.get(key) || 0) + 1);
+    if (!hoursByTech.has(key)) hoursByTech.set(key, []);
+    hoursByTech.get(key).push(t.hours);
+  }
+  const technicians = [...TECHNICIANS, UNASSIGNED].map(label => ({
+    label, value: openByTech.get(label) || 0, completed: completedByTech.get(label) || 0,
+  }));
+  const aging = AGING.map((b, i) => ({ label: b.label, value: agingCounts[i] }));
+  const pickupWaiting = PICKUP.map((b, i) => ({ label: b.label, value: pickupCounts[i] }));
   const turnaroundByTechnician = TECHNICIANS.map(label => {
-    const values = turnaround.filter(t => t.technician === label).map(t => t.hours);
+    const values = hoursByTech.get(label) || [];
     const value = median(values);
     return { label, value: value === null ? 0 : Math.round(value * 10) / 10, count: values.length };
   });
@@ -992,20 +1060,20 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
   res.json({
     generatedAt: new Date().toISOString(), interval, filters,
     summary: {
-      createdToday: categoryOrders.filter(o => o.created_at.slice(0, 10) === today).length,
+      createdToday,
       open: openOrders.length,
-      inRepair: categoryOrders.filter(o => o.status === 'En reparación').length,
-      ready: readyOrders.length,
+      inRepair: counts.inRepair,
+      ready: counts.ready,
       deliveredToday,
-      aging: openOrders.filter(o => ageDays(o) >= 3).length,
-      overdue: openOrders.filter(o => o.promised_at && o.promised_at < today).length,
-      waitingPickup: readyOrders.filter(o => (pickupHours(o) || 0) >= 48).length,
+      aging: counts.aging,
+      overdue: counts.overdue,
+      waitingPickup: counts.waitingPickup,
     },
     created: [...byCreated.values()].sort((a, b) => a.key.localeCompare(b.key)),
     statuses,
     technicians,
-    devices: countBy(rangeOrders, o => o.device_type),
-    issues: countBy(rangeOrders.flatMap(o => JSON.parse(o.problems || '[]')), p => p).slice(0, 10),
+    devices,
+    issues,
     aging,
     pickupWaiting,
     turnaround: {
