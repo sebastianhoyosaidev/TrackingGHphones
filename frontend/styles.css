@@ -38,14 +38,6 @@ body {
 .brand-logo { height: 52px; width: auto; }
 .brand-titles h1 { margin: 0; font-size: 1.35rem; }
 .brand-titles p { margin: 2px 0 0; font-size: 0.85rem; color: #a9c6e8; }
-.blu-slot-header {
-  margin-left: auto;
-  width: 76px; height: 76px;
-  border: 2px dashed rgba(255,255,255,.45);
-  border-radius: 14px;
-  display: flex; align-items: center; justify-content: center;
-  text-align: center; font-size: .75rem; color: #cfe3ff; line-height: 1.25;
-}
 
 /* ---------- Tabs ---------- */
 .tabs {
@@ -71,18 +63,6 @@ main { max-width: 1320px; margin: 0 auto; padding: 18px 14px 60px; }
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
 .error { color: var(--brand-red); font-weight: 600; }
-
-/* ---------- Blu placeholder (intake) ---------- */
-.blu-slot-intake {
-  border: 2px dashed var(--brand-blue);
-  background: #e9eff8;
-  color: var(--brand-blue-dark);
-  border-radius: var(--radius);
-  padding: 18px;
-  text-align: center;
-  margin-bottom: 18px;
-  font-size: .95rem;
-}
 
 /* ---------- Form ---------- */
 form label, .field { display: block; margin-bottom: 16px; font-weight: 600; font-size: .95rem; }
@@ -282,3 +262,5 @@ textarea { resize: vertical; }
   .lookup-row { flex-direction: column; }
   .lookup-row .btn-primary { width: 100%; }
 }
+
+#orders-load-more { margin-top: 16px; }

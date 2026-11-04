@@ -577,16 +577,39 @@ app.get('/api/orders', (req, res) => {
       ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at
     FROM orders` + where.sql;
   const params = [...where.params];
+  let hasWhere = Boolean(where.sql);
   if (search.trim()) {
     const likeCols = ['customer_name', 'ticket', 'model', 'phone']
       .map(c => `${c} LIKE ? ESCAPE '\\'`).join(' OR ');
     sql += (where.sql ? ' AND ' : ' WHERE ') + `(${likeCols})`;
     const like = `%${escapeLike(search.trim())}%`;
     params.push(like, like, like, like);
+    hasWhere = true;
+  }
+  // Paginación opcional (limit + cursor). Sin `limit` se devuelve el arreglo
+  // completo como antes (lo usa la exportación CSV del panel).
+  const hasLimit = req.query.limit !== undefined;
+  let limit = 0;
+  if (hasLimit) {
+    limit = parseInt(req.query.limit, 10);
+    if (!Number.isInteger(limit) || limit < 1) limit = 50;
+    limit = Math.min(limit, 200);
+    const cursor = parseInt(req.query.cursor, 10);
+    if (Number.isInteger(cursor) && cursor > 0) {
+      sql += (hasWhere ? ' AND ' : ' WHERE ') + 'orders.id < ?';
+      params.push(cursor);
+    }
   }
   sql += ' ORDER BY id DESC';
+  if (hasLimit) {
+    sql += ' LIMIT ?';
+    params.push(limit + 1); // una fila extra para saber si hay más
+  }
   const rows = db.prepare(sql).all(...params).map(toPublic);
-  res.json(rows);
+  if (!hasLimit) return res.json(rows);
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  res.json({ orders: page, next_cursor: hasMore ? page[page.length - 1].id : null });
 });
 
 function localDateOnly(value) {

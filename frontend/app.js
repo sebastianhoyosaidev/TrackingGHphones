@@ -311,8 +311,15 @@ document.querySelectorAll('#status-filter .chip').forEach(b => {
   });
 });
 
-async function loadOrders() {
+const ORDERS_PAGE_SIZE = 50;
+let ordersNextCursor = null;
+let ordersRequestId = 0;
+
+async function loadOrders(append) {
+  // Los listeners pasan un Event; solo `true` significa "Cargar más".
+  append = append === true;
   const list = document.getElementById('orders-list');
+  const moreBtn = document.getElementById('orders-load-more');
   const q = new URLSearchParams({
     search: document.getElementById('orders-search').value,
     status: currentStatusFilter,
@@ -324,16 +331,31 @@ async function loadOrders() {
   });
   ['aging_bucket', 'pickup_bucket', 'open_only', 'overdue', 'completed_technician', 'completed_from', 'completed_to', 'completed_unassigned', 'unassigned']
     .forEach(key => { if (list.dataset[key]) q.set(key, list.dataset[key]); });
-  list.innerHTML = '<p class="empty">Cargando órdenes…</p>';
+  q.set('limit', String(ORDERS_PAGE_SIZE));
+  if (append && ordersNextCursor) q.set('cursor', String(ordersNextCursor));
+  const requestId = ++ordersRequestId;
+  if (append) {
+    moreBtn.disabled = true;
+    moreBtn.textContent = 'Cargando…';
+  } else {
+    ordersNextCursor = null;
+    moreBtn.classList.add('hidden');
+    list.innerHTML = '<p class="empty">Cargando órdenes…</p>';
+  }
   try {
     const response = await api('/api/orders?' + q);
     if (!response.ok) throw new Error('No se pudieron cargar las órdenes.');
-    const orders = await response.json();
-    if (!orders.length) {
+    const data = await response.json();
+    if (requestId !== ordersRequestId) return; // llegó una búsqueda más nueva
+    const orders = data.orders;
+    ordersNextCursor = data.next_cursor;
+    moreBtn.classList.toggle('hidden', !ordersNextCursor);
+    if (!append && !orders.length) {
       list.innerHTML = '<p class="empty">No hay órdenes aquí todavía.</p>';
       return;
     }
-    list.innerHTML = '';
+    if (!append) list.innerHTML = '';
+    const newCards = [];
     orders.forEach(o => {
       const card = document.createElement('div');
       card.className = 'order-card';
@@ -358,19 +380,29 @@ async function loadOrders() {
         </div>
         <div class="order-history hidden" id="order-history-${o.id}" aria-live="polite"></div>`;
       list.appendChild(card);
+      newCards.push(card);
     });
-    list.querySelectorAll('.btn-advance').forEach(b =>
-      b.addEventListener('click', () => advanceOrder(b.dataset.id)));
-    list.querySelectorAll('.btn-edit').forEach(b =>
-      b.addEventListener('click', () => openEdit(b.dataset.id)));
-    list.querySelectorAll('.btn-history').forEach(b =>
-      b.addEventListener('click', () => toggleOrderHistory(b)));
-    list.querySelectorAll('.btn-delete').forEach(b =>
-      b.addEventListener('click', () => deleteOrder(b.dataset.id)));
+    // Solo se enganchan las tarjetas nuevas, para no duplicar listeners al "Cargar más".
+    newCards.forEach(card => {
+      card.querySelectorAll('.btn-advance').forEach(b =>
+        b.addEventListener('click', () => advanceOrder(b.dataset.id)));
+      card.querySelectorAll('.btn-edit').forEach(b =>
+        b.addEventListener('click', () => openEdit(b.dataset.id)));
+      card.querySelectorAll('.btn-history').forEach(b =>
+        b.addEventListener('click', () => toggleOrderHistory(b)));
+      card.querySelectorAll('.btn-delete').forEach(b =>
+        b.addEventListener('click', () => deleteOrder(b.dataset.id)));
+    });
   } catch {
-    list.innerHTML = '<p class="empty">No se pudo cargar. Revisa la conexión.</p>';
+    if (requestId !== ordersRequestId) return;
+    if (append) alert('No se pudieron cargar más órdenes. Revisa la conexión.');
+    else list.innerHTML = '<p class="empty">No se pudo cargar. Revisa la conexión.</p>';
+  } finally {
+    moreBtn.disabled = false;
+    moreBtn.textContent = 'Cargar más';
   }
 }
+document.getElementById('orders-load-more').addEventListener('click', () => loadOrders(true));
 
 async function toggleOrderHistory(button) {
   const box = document.getElementById('order-history-' + button.dataset.id);
@@ -706,7 +738,7 @@ function openOrdersFromChart(params) {
     if (value) document.getElementById('orders-list').dataset[key] = value;
     else delete document.getElementById('orders-list').dataset[key];
   });
-  loadOrders(params);
+  loadOrders();
 }
 
 document.getElementById('dashboard-export').addEventListener('click', async () => {
