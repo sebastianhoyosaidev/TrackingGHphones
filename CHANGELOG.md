@@ -3,6 +3,19 @@
 Notas de cada versión publicada. El código vive en este repo privado;
 la app de verdad corre en el servidor (Oracle Cloud).
 
+## Sin publicar
+
+**Lista de órdenes paginada**
+- `GET /api/orders` acepta `limit` (1–200, por defecto 50) y `cursor` (id de la
+  última orden recibida). Con `limit` responde `{ orders, next_cursor }`; sin
+  `limit` sigue devolviendo el arreglo completo (lo usa la exportación CSV).
+- La pestaña Órdenes carga 50 a la vez y muestra el botón "Cargar más".
+- Las respuestas viejas de la búsqueda se descartan si ya llegó una más nueva.
+
+**Limpieza**
+- Se quitaron los espacios reservados para la mascota Blu (encabezado y
+  formulario de ingreso).
+
 ## v1.3.0 — 2026-10-21 — Panel operativo, asignación y reportes
 
 **Panel de operaciones**
