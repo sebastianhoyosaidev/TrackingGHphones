@@ -135,17 +135,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_staff_sessions_user ON staff_sessions(user_id);
 `);
 // Índices de rendimiento (se crean una sola vez; no cambian datos).
-// - orders(created_at): filtros por rango de fechas.
+// - orders(created_at, ...): filtros por rango de fechas.
 // - orders(status): órdenes abiertas / listas del panel.
 // - order_events(order_id, event_type, to_status, created_at): "desde cuándo
 //   está en este estado" y "cuándo quedó Listo" por cada orden.
 // - order_events(event_type, to_status, created_at): entregas por fecha.
+// Los índices "de cobertura" llevan además las columnas que el panel lee,
+// así SQLite responde desde el índice sin abrir cada fila.
+// - orders(assigned_technician, device_type) y orders(device_type): filtros
+//   por técnico / equipo y la lista de equipos del panel.
 db.exec(`
-  CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
+  DROP INDEX IF EXISTS idx_orders_created;
+  DROP INDEX IF EXISTS idx_order_events_status_date;
+  CREATE INDEX IF NOT EXISTS idx_orders_created_cover ON orders(created_at, status, device_type, assigned_technician);
   CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+  CREATE INDEX IF NOT EXISTS idx_orders_technician ON orders(assigned_technician, device_type);
+  CREATE INDEX IF NOT EXISTS idx_orders_device ON orders(device_type);
   CREATE INDEX IF NOT EXISTS idx_order_events_order_status ON order_events(order_id, event_type, to_status, created_at);
-  CREATE INDEX IF NOT EXISTS idx_order_events_status_date ON order_events(event_type, to_status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_order_events_status_date_cover ON order_events(event_type, to_status, created_at, order_id, assigned_technician);
 `);
+// Estadísticas para que SQLite elija bien los índices (barato; recomendado
+// por SQLite al abrir la base).
+db.exec('PRAGMA optimize = 0x10002;');
 
 function withTransaction(work) {
   db.exec('BEGIN IMMEDIATE');
@@ -683,23 +694,26 @@ function localDateOnly(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+// Formateadores creados una sola vez (crear uno por fecha es lento).
+const LABEL_MONTH_YEAR = new Intl.DateTimeFormat('es-US', { month: 'short', year: '2-digit' });
+const LABEL_MONTH_DAY = new Intl.DateTimeFormat('es-US', { month: 'short', day: 'numeric' });
 function dateBucket(dateValue, interval) {
   const date = new Date(`${dateValue.slice(0, 10)}T12:00:00`);
   if (Number.isNaN(date.getTime())) return null;
   const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   if (interval === 'month') {
     const start = new Date(date.getFullYear(), date.getMonth(), 1);
-    return { key: fmt(start), label: start.toLocaleDateString('es-US', { month: 'short', year: '2-digit' }),
+    return { key: fmt(start), label: LABEL_MONTH_YEAR.format(start),
       from: fmt(start), to: fmt(new Date(date.getFullYear(), date.getMonth() + 1, 0)), value: 0 };
   }
   if (interval === 'week') {
     const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
     start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
     const end = new Date(start); end.setDate(end.getDate() + 6);
-    return { key: fmt(start), label: `${start.toLocaleDateString('es-US', { month: 'short', day: 'numeric' })}–${end.toLocaleDateString('es-US', { month: 'short', day: 'numeric' })}`,
+    return { key: fmt(start), label: `${LABEL_MONTH_DAY.format(start)}–${LABEL_MONTH_DAY.format(end)}`,
       from: fmt(start), to: fmt(end), value: 0 };
   }
-  return { key: fmt(date), label: date.toLocaleDateString('es-US', { month: 'short', day: 'numeric' }),
+  return { key: fmt(date), label: LABEL_MONTH_DAY.format(date),
     from: fmt(date), to: fmt(date), value: 0 };
 }
 
@@ -797,24 +811,52 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
       (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
   };
   const statuses = STATUSES.map(label => ({ label, value: statusCounts.get(label) || 0 }));
-  const technicians = TECHNICIANS.map(label => ({
-    label, value: openOrders.filter(o => o.assigned_technician === label).length,
-    completed: completed.filter(e => e.assigned_technician === label).length,
-  }));
-  technicians.push({ label: 'Sin asignar', value: openOrders.filter(o => !o.assigned_technician).length,
-    completed: completed.filter(e => !e.assigned_technician).length });
-  const aging = [
+
+  // Un solo recorrido por las órdenes abiertas y otro por las entregas: se
+  // acumulan todos los conteos a la vez en vez de filtrar la lista muchas veces.
+  const AGING = [
     { label: '0–1 días', min: 0, max: 2 }, { label: '2–3 días', min: 2, max: 4 },
     { label: '4–7 días', min: 4, max: 8 }, { label: '8+ días', min: 8, max: Infinity },
-  ].map(b => ({ label: b.label, value: openOrders.filter(o => ageDays(o) >= b.min && ageDays(o) < b.max).length }));
-  const pickupWaiting = [
+  ];
+  const PICKUP = [
     { label: '<24 h', min: 0, max: 24 }, { label: '1–2 días', min: 24, max: 48 },
     { label: '2–3 días', min: 48, max: 72 }, { label: '3+ días', min: 72, max: Infinity },
-  ].map(b => ({ label: b.label, value: readyOrders.filter(o => {
-    const hours = pickupHours(o); return hours !== null && hours >= b.min && hours < b.max;
-  }).length }));
+  ];
+  const UNASSIGNED = 'Sin asignar';
+  const techKey = name => (name ? name : UNASSIGNED);
+  const openByTech = new Map(), completedByTech = new Map(), hoursByTech = new Map();
+  const agingCounts = AGING.map(() => 0), pickupCounts = PICKUP.map(() => 0);
+  const summaryCounts = { inRepair: 0, aging: 0, overdue: 0, waitingPickup: 0 };
+  for (const o of openOrders) {
+    openByTech.set(techKey(o.assigned_technician), (openByTech.get(techKey(o.assigned_technician)) || 0) + 1);
+    const age = ageDays(o);
+    const ai = AGING.findIndex(b => age >= b.min && age < b.max);
+    if (ai >= 0) agingCounts[ai]++;
+    if (age >= 3) summaryCounts.aging++;
+    if (o.status === 'En reparación') summaryCounts.inRepair++;
+    if (o.promised_at && o.promised_at < today) summaryCounts.overdue++;
+    if (o.status === 'Listo') {
+      const hours = pickupHours(o);
+      if (hours !== null) {
+        const pi = PICKUP.findIndex(b => hours >= b.min && hours < b.max);
+        if (pi >= 0) pickupCounts[pi]++;
+      }
+      if ((hours || 0) >= 48) summaryCounts.waitingPickup++;
+    }
+  }
+  for (const t of turnaround) {
+    const key = techKey(t.technician);
+    completedByTech.set(key, (completedByTech.get(key) || 0) + 1);
+    if (!hoursByTech.has(key)) hoursByTech.set(key, []);
+    hoursByTech.get(key).push(t.hours);
+  }
+  const technicians = [...TECHNICIANS, UNASSIGNED].map(label => ({
+    label, value: openByTech.get(label) || 0, completed: completedByTech.get(label) || 0,
+  }));
+  const aging = AGING.map((b, i) => ({ label: b.label, value: agingCounts[i] }));
+  const pickupWaiting = PICKUP.map((b, i) => ({ label: b.label, value: pickupCounts[i] }));
   const turnaroundByTechnician = TECHNICIANS.map(label => {
-    const values = turnaround.filter(t => t.technician === label).map(t => t.hours);
+    const values = hoursByTech.get(label) || [];
     const value = median(values);
     return { label, value: value === null ? 0 : Math.round(value * 10) / 10, count: values.length };
   });
@@ -824,12 +866,12 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
     summary: {
       createdToday,
       open: openOrders.length,
-      inRepair: openOrders.filter(o => o.status === 'En reparación').length,
+      inRepair: summaryCounts.inRepair,
       ready: readyOrders.length,
       deliveredToday,
-      aging: openOrders.filter(o => ageDays(o) >= 3).length,
-      overdue: openOrders.filter(o => o.promised_at && o.promised_at < today).length,
-      waitingPickup: readyOrders.filter(o => (pickupHours(o) || 0) >= 48).length,
+      aging: summaryCounts.aging,
+      overdue: summaryCounts.overdue,
+      waitingPickup: summaryCounts.waitingPickup,
     },
     created: [...byCreated.values()].sort((a, b) => a.key.localeCompare(b.key)),
     statuses,

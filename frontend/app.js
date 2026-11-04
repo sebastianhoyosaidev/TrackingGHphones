@@ -614,21 +614,30 @@ function updateDeviceOptions(deviceTypes) {
   }
 }
 
+// Si el panel se pide otra vez (otro clic en la pestaña o en filtros), se
+// cancela la petición anterior y solo se dibuja la respuesta más nueva.
+let dashboardAbort = null;
+let dashboardRequestId = 0;
 async function loadDashboard() {
   const state = document.getElementById('dashboard-state');
   const content = document.getElementById('dashboard-content');
+  if (dashboardAbort) dashboardAbort.abort();
+  dashboardAbort = new AbortController();
+  const requestId = ++dashboardRequestId;
   state.textContent = 'Cargando datos del taller…';
   state.classList.remove('error');
   content.classList.add('hidden');
   try {
-    const response = await api('/api/dashboard?' + dashboardQuery());
+    const response = await api('/api/dashboard?' + dashboardQuery(), { signal: dashboardAbort.signal });
     const data = await response.json();
+    if (requestId !== dashboardRequestId) return;
     if (!response.ok) throw new Error(data.error || 'No se pudo cargar el panel.');
     updateDeviceOptions(data.deviceTypes || []);
     renderDashboard(data);
     content.classList.remove('hidden');
     state.textContent = data.created.length ? '' : 'No hay órdenes en el período seleccionado.';
   } catch (error) {
+    if (requestId !== dashboardRequestId) return; // la reemplazó una más nueva
     state.textContent = error.message || 'No se pudo cargar el panel. Revisa la conexión.';
     state.classList.add('error');
   }
