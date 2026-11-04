@@ -50,6 +50,11 @@ function makeRateLimiter({ windowMs, max, message }) {
     const now = Date.now();
     const recent = (hits.get(ip) || []).filter(t => now - t < windowMs);
     recent.push(now);
+    // Basta guardar las últimas max+1 marcas para decidir "¿más de max en la
+    // ventana?". Antes se guardaban todas (también las rechazadas) y bajo un
+    // bombardeo cada petición revisaba una lista cada vez más larga. Bloquea
+    // exactamente igual que antes: quien sigue insistiendo sigue bloqueado.
+    if (recent.length > max + 1) recent.splice(0, recent.length - (max + 1));
     hits.set(ip, recent);
     if (++sweeps % 512 === 0) {
       for (const [key, timestamps] of hits) {
