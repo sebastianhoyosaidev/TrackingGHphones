@@ -134,6 +134,18 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_staff_sessions_user ON staff_sessions(user_id);
 `);
+// Índices de rendimiento (se crean una sola vez; no cambian datos).
+// - orders(created_at): filtros por rango de fechas.
+// - orders(status): órdenes abiertas / listas del panel.
+// - order_events(order_id, event_type, to_status, created_at): "desde cuándo
+//   está en este estado" y "cuándo quedó Listo" por cada orden.
+// - order_events(event_type, to_status, created_at): entregas por fecha.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
+  CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+  CREATE INDEX IF NOT EXISTS idx_order_events_order_status ON order_events(order_id, event_type, to_status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_order_events_status_date ON order_events(event_type, to_status, created_at);
+`);
 
 function withTransaction(work) {
   db.exec('BEGIN IMMEDIATE');
@@ -204,10 +216,18 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
   return `${salt}:${hash}`;
 }
-function verifyPassword(password, stored) {
+// Versiones asíncronas para las rutas: scrypt corre en el pool de hilos de
+// Node y no congela al resto de peticiones mientras se verifica una clave.
+const scryptAsync = (password, salt) => new Promise((resolve, reject) =>
+  crypto.scrypt(password, salt, 64, (err, key) => (err ? reject(err) : resolve(key))));
+async function hashPasswordAsync(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return `${salt}:${(await scryptAsync(password, salt)).toString('hex')}`;
+}
+async function verifyPassword(password, stored) {
   const parts = String(stored).split(':');
   if (parts.length !== 2) return false;
-  const check = crypto.scryptSync(password, parts[0], 64);
+  const check = await scryptAsync(password, parts[0]);
   const expected = Buffer.from(parts[1], 'hex');
   return check.length === expected.length && crypto.timingSafeEqual(check, expected);
 }
@@ -305,7 +325,8 @@ app.get('/api/config', (req, res) => {
   res.json({ devMode: process.env.NODE_ENV !== 'production' });
 });
 
-app.post('/api/login', loginRateLimit, (req, res) => {
+app.post('/api/login', loginRateLimit, async (req, res, next) => {
+  try {
   const { username, password } = req.body || {};
   if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
     return res.status(401).json({ error: 'Credenciales inválidas.' });
@@ -315,16 +336,17 @@ app.post('/api/login', loginRateLimit, (req, res) => {
     // B-4: corre un scrypt dummy con salt aleatoria para que el tiempo de
     // respuesta no revele si el usuario existe (antes se respondía más
     // rápido al no pasar por scrypt). Mensaje genérico igual que abajo.
-    crypto.scryptSync(password, crypto.randomBytes(16), 64);
+    await scryptAsync(password, crypto.randomBytes(16));
     return res.status(401).json({ error: 'Credenciales inválidas.' });
   }
   // Mensaje genérico a propósito: no revela si el usuario existe.
-  if (!verifyPassword(password, user.password_hash)) {
+  if (!(await verifyPassword(password, user.password_hash))) {
     return res.status(401).json({ error: 'Credenciales inválidas.' });
   }
   const token = createSession(user.id, user.username);
   setSessionCookie(req, res, token);
   res.json({ ok: true, username: user.username });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/logout', (req, res) => {
@@ -343,21 +365,24 @@ app.get('/api/me', (req, res) => {
   res.json({ username: user.username });
 });
 
-app.post('/api/change-password', requireAuth, (req, res) => {
+app.post('/api/change-password', requireAuth, async (req, res, next) => {
+  try {
   const { currentPassword, newPassword } = req.body || {};
   if (typeof newPassword !== 'string' || newPassword.length < 8) {
     return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 8 caracteres.' });
   }
   const user = db.prepare('SELECT * FROM staff_users WHERE id = ?').get(req.staffUser.id);
-  if (!user || !verifyPassword(currentPassword || '', user.password_hash)) {
+  if (!user || !(await verifyPassword(typeof currentPassword === 'string' ? currentPassword : '', user.password_hash))) {
     return res.status(401).json({ error: 'Credenciales inválidas.' });
   }
-  db.prepare('UPDATE staff_users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), user.id);
+  const newHash = await hashPasswordAsync(newPassword);
+  db.prepare('UPDATE staff_users SET password_hash = ? WHERE id = ?').run(newHash, user.id);
   // Revoca todas las sesiones y emite una fresca.
   db.prepare('DELETE FROM staff_sessions WHERE user_id = ?').run(user.id);
   const token = createSession(user.id, user.username);
   setSessionCookie(req, res, token);
   res.json({ ok: true });
+  } catch (error) { next(error); }
 });
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sin 0/O/1/I/L para evitar confusiones
@@ -513,11 +538,13 @@ function readOrderFilters(query) {
 function buildOrderWhere(filters) {
   const clauses = [];
   const params = [];
-  if (filters.from) { clauses.push('date(created_at) >= date(?)'); params.push(filters.from); }
-  if (filters.to) { clauses.push('date(created_at) <= date(?)'); params.push(filters.to); }
-  if (filters.status) { clauses.push('status = ?'); params.push(filters.status); }
-  if (filters.technician) { clauses.push('assigned_technician = ?'); params.push(filters.technician); }
-  if (filters.deviceType) { clauses.push('device_type = ?'); params.push(filters.deviceType); }
+  // Comparación directa sobre created_at ('AAAA-MM-DD HH:MM:SS') en vez de
+  // date(created_at): da el mismo resultado y permite usar el índice.
+  if (filters.from) { clauses.push('orders.created_at >= ?'); params.push(filters.from); }
+  if (filters.to) { clauses.push("orders.created_at < date(?, '+1 day')"); params.push(filters.to); }
+  if (filters.status) { clauses.push('orders.status = ?'); params.push(filters.status); }
+  if (filters.technician) { clauses.push('orders.assigned_technician = ?'); params.push(filters.technician); }
+  if (filters.deviceType) { clauses.push('orders.device_type = ?'); params.push(filters.deviceType); }
   if (filters.problem) { clauses.push("EXISTS (SELECT 1 FROM json_each(orders.problems) WHERE value = ?)"); params.push(filters.problem); }
   if (filters.openOnly) clauses.push("orders.status <> 'Entregado'");
   if (filters.unassignedOnly) clauses.push('orders.assigned_technician IS NULL');
@@ -546,17 +573,22 @@ function buildOrderWhere(filters) {
     }
   }
   if (filters.completedTechnician || filters.completedFrom || filters.completedTo || filters.completedUnassigned) {
-    clauses.push(`EXISTS (SELECT 1 FROM order_events e WHERE e.order_id = orders.id
-      AND e.event_type = 'status' AND e.to_status = 'Entregado'
-      AND (? = '' OR e.assigned_technician = ?)
-      AND (? = 0 OR e.assigned_technician IS NULL)
-      AND (? = '' OR date(e.created_at) >= date(?))
-      AND (? = '' OR date(e.created_at) <= date(?)))`);
-    params.push(filters.completedTechnician, filters.completedTechnician,
-      filters.completedUnassigned ? 1 : 0,
-      filters.completedFrom, filters.completedFrom, filters.completedTo, filters.completedTo);
+    const sub = ["e.order_id = orders.id", "e.event_type = 'status'", "e.to_status = 'Entregado'"];
+    if (filters.completedTechnician) { sub.push('e.assigned_technician = ?'); params.push(filters.completedTechnician); }
+    if (filters.completedUnassigned) sub.push('e.assigned_technician IS NULL');
+    if (filters.completedFrom) { sub.push('e.created_at >= ?'); params.push(filters.completedFrom); }
+    if (filters.completedTo) { sub.push("e.created_at < date(?, '+1 day')"); params.push(filters.completedTo); }
+    clauses.push(`EXISTS (SELECT 1 FROM order_events e WHERE ${sub.join(' AND ')})`);
   }
   return { sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+// Agrega una condición más a un WHERE ya armado (o lo empieza).
+function andWhere(where, clause, ...params) {
+  return {
+    sql: where.sql ? `${where.sql} AND ${clause}` : ` WHERE ${clause}`,
+    params: [...where.params, ...params],
+  };
 }
 
 // B-9: escapa los comodines de LIKE (\, %, _) para que se busquen como
@@ -565,51 +597,84 @@ function escapeLike(s) {
   return s.replace(/[\\%_]/g, c => '\\' + c);
 }
 
-// List orders (search + status filter)
-app.get('/api/orders', (req, res) => {
-  const search = typeof req.query.search === 'string' ? req.query.search : '';
-  const status = typeof req.query.status === 'string' ? req.query.status : '';
-  const filters = readOrderFilters({ ...req.query, status: status || '' });
-  const where = buildOrderWhere(filters);
-  let sql = `SELECT orders.*,
+// Arma la consulta de la lista de órdenes (filtros + búsqueda). La usan la
+// lista paginada y la exportación CSV, así ambas filtran exactamente igual.
+function orderListWhere(query) {
+  const search = typeof query.search === 'string' ? query.search.trim() : '';
+  const status = typeof query.status === 'string' ? query.status : '';
+  let where = buildOrderWhere(readOrderFilters({ ...query, status: status || '' }));
+  if (search) {
+    const like = `%${escapeLike(search)}%`;
+    const likeCols = ['customer_name', 'ticket', 'model', 'phone']
+      .map(c => `orders.${c} LIKE ? ESCAPE '\\'`).join(' OR ');
+    where = andWhere(where, `(${likeCols})`, like, like, like, like);
+  }
+  return where;
+}
+const ORDER_LIST_SELECT = `SELECT orders.*,
     (SELECT e.created_at FROM order_events e WHERE e.order_id = orders.id
       AND e.event_type = 'status' AND e.to_status = orders.status
       ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status_changed_at
-    FROM orders` + where.sql;
-  const params = [...where.params];
-  let hasWhere = Boolean(where.sql);
-  if (search.trim()) {
-    const likeCols = ['customer_name', 'ticket', 'model', 'phone']
-      .map(c => `${c} LIKE ? ESCAPE '\\'`).join(' OR ');
-    sql += (where.sql ? ' AND ' : ' WHERE ') + `(${likeCols})`;
-    const like = `%${escapeLike(search.trim())}%`;
-    params.push(like, like, like, like);
-    hasWhere = true;
-  }
-  // Paginación opcional (limit + cursor). Sin `limit` se devuelve el arreglo
-  // completo como antes (lo usa la exportación CSV del panel).
+    FROM orders`;
+
+// Lista de órdenes (búsqueda + filtros). Paginación opcional con limit +
+// cursor; sin `limit` devuelve el arreglo completo (compatibilidad).
+app.get('/api/orders', (req, res) => {
+  let where = orderListWhere(req.query);
   const hasLimit = req.query.limit !== undefined;
-  let limit = 0;
-  if (hasLimit) {
-    limit = parseInt(req.query.limit, 10);
-    if (!Number.isInteger(limit) || limit < 1) limit = 50;
-    limit = Math.min(limit, 200);
-    const cursor = parseInt(req.query.cursor, 10);
-    if (Number.isInteger(cursor) && cursor > 0) {
-      sql += (hasWhere ? ' AND ' : ' WHERE ') + 'orders.id < ?';
-      params.push(cursor);
-    }
-  }
-  sql += ' ORDER BY id DESC';
-  if (hasLimit) {
-    sql += ' LIMIT ?';
-    params.push(limit + 1); // una fila extra para saber si hay más
-  }
+  let limit = parseInt(req.query.limit, 10);
+  if (!Number.isInteger(limit) || limit < 1) limit = 50;
+  limit = Math.min(limit, 200);
+  const cursor = parseInt(req.query.cursor, 10);
+  if (hasLimit && Number.isInteger(cursor) && cursor > 0) where = andWhere(where, 'orders.id < ?', cursor);
+  let sql = ORDER_LIST_SELECT + where.sql + ' ORDER BY orders.id DESC';
+  const params = [...where.params];
+  if (hasLimit) { sql += ' LIMIT ?'; params.push(limit + 1); } // una fila extra para saber si hay más
   const rows = db.prepare(sql).all(...params).map(toPublic);
   if (!hasLimit) return res.json(rows);
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   res.json({ orders: page, next_cursor: hasMore ? page[page.length - 1].id : null });
+});
+
+// Exportación CSV en el servidor, por partes de 500 órdenes. Se va enviando
+// mientras se lee, así no se arma todo en memoria (ni aquí ni en el navegador)
+// y entre parte y parte el servidor atiende otras peticiones.
+const CSV_COLUMNS = [
+  ['Ticket', 'ticket'], ['Cliente', 'customer_name'], ['Teléfono', 'phone'], ['Equipo', 'device_type'],
+  ['Modelo', 'model'], ['Problemas', o => o.problems.join('; ')], ['Estado', 'status'],
+  ['Técnico asignado', 'assigned_technician'], ['Recibió', 'received_by'], ['Fecha de ingreso', 'created_at'],
+  ['Fecha prometida', 'promised_at'], ['Último cambio de estado', 'status_changed_at'],
+];
+const csvCell = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+app.get('/api/orders/export.csv', async (req, res, next) => {
+  try {
+    const where = orderListWhere(req.query);
+    const BATCH = 500;
+    const firstStmt = db.prepare(ORDER_LIST_SELECT + where.sql + ' ORDER BY orders.id DESC LIMIT ?');
+    const nextStmt = db.prepare(ORDER_LIST_SELECT + andWhere(where, 'orders.id < ?').sql + ' ORDER BY orders.id DESC LIMIT ?');
+    const today = db.prepare("SELECT date('now', 'localtime') AS d").get().d;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="reporte-ordenes-${today}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.write('﻿' + CSV_COLUMNS.map(([label]) => csvCell(label)).join(',') + '\r\n');
+    let cursor = null;
+    for (;;) {
+      const rows = cursor === null
+        ? firstStmt.all(...where.params, BATCH)
+        : nextStmt.all(...where.params, cursor, BATCH);
+      if (!rows.length) break;
+      const chunk = rows.map(toPublic).map(order => CSV_COLUMNS.map(([, key]) =>
+        csvCell(typeof key === 'function' ? key(order) : order[key])).join(',')).join('\r\n') + '\r\n';
+      if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve));
+      if (rows.length < BATCH || res.destroyed) break;
+      cursor = rows[rows.length - 1].id;
+      await new Promise(resolve => setImmediate(resolve)); // deja pasar otras peticiones
+    }
+    res.end();
+  } catch (error) {
+    if (res.headersSent) res.destroy(error); else next(error);
+  }
 });
 
 function localDateOnly(value) {
@@ -648,65 +713,79 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
     return res.status(400).json({ error: 'El inicio del período debe ser anterior al final.' });
   }
   const interval = ['day', 'week', 'month'].includes(req.query.interval) ? req.query.interval : 'day';
+  // categoryWhere: mismos filtros sin el rango de fechas (estado actual del
+  // taller). rangeWhere: con el rango de fechas (gráficas del período).
   const categoryWhere = buildOrderWhere({ ...filters, from: '', to: '' });
   const rangeWhere = buildOrderWhere(filters);
-  const categoryOrders = db.prepare('SELECT * FROM orders' + categoryWhere.sql).all(...categoryWhere.params);
-  const rangeOrders = db.prepare('SELECT * FROM orders' + rangeWhere.sql).all(...rangeWhere.params);
   const today = db.prepare("SELECT date('now', 'localtime') AS today").get().today;
   const now = Date.now();
   const dateMs = value => Date.parse(String(value || '').replace(' ', 'T'));
   const ageDays = order => Math.max(0, (now - dateMs(order.created_at)) / 86400000);
-  const openOrders = categoryOrders.filter(o => o.status !== 'Entregado');
-  const readyOrders = categoryOrders.filter(o => o.status === 'Listo');
-  const latestReady = new Map();
-  for (const event of db.prepare(`
-    SELECT e.order_id, e.created_at FROM order_events e
-    WHERE e.event_type = 'status' AND e.to_status = 'Listo'
-    ORDER BY e.created_at DESC, e.id DESC
-  `).all()) {
-    if (!latestReady.has(event.order_id)) latestReady.set(event.order_id, event.created_at);
-  }
-  const pickupHours = order => latestReady.has(order.id)
-    ? Math.max(0, (now - dateMs(latestReady.get(order.id))) / 3600000) : null;
 
-  const deliveredSql = `
-    SELECT COUNT(*) AS n FROM order_events e JOIN orders o ON o.id = e.order_id
-    WHERE e.event_type = 'status' AND e.to_status = 'Entregado'
-      AND date(e.created_at) = date('now', 'localtime')
-      AND (? = '' OR e.assigned_technician = ?)
-      AND (? = '' OR o.device_type = ?)
-      AND (? = '' OR o.status = ?)
-      AND (? = '' OR EXISTS (SELECT 1 FROM json_each(o.problems) WHERE value = ?))
-  `;
-  const deliveredToday = db.prepare(deliveredSql).get(
-    filters.technician, filters.technician, filters.deviceType, filters.deviceType,
-    filters.status, filters.status, filters.problem, filters.problem
-  ).n;
+  // Solo se cargan las órdenes ABIERTAS (lo que hay en el taller ahora), no
+  // todo el historial. Para las que están Listo se trae de una vez cuándo
+  // quedaron listas (índice por orden).
+  const openWhere = andWhere(categoryWhere, "orders.status <> 'Entregado'");
+  const openOrders = db.prepare(`
+    SELECT orders.id, orders.status, orders.created_at, orders.assigned_technician, orders.promised_at,
+      CASE WHEN orders.status = 'Listo' THEN (
+        SELECT MAX(e.created_at) FROM order_events e
+        WHERE e.order_id = orders.id AND e.event_type = 'status' AND e.to_status = 'Listo'
+      ) END AS ready_at
+    FROM orders` + openWhere.sql).all(...openWhere.params);
+  const readyOrders = openOrders.filter(o => o.status === 'Listo');
+  const pickupHours = order => order.ready_at ? Math.max(0, (now - dateMs(order.ready_at)) / 3600000) : null;
+  const createdTodayWhere = andWhere(categoryWhere, "orders.created_at >= ? AND orders.created_at < date(?, '+1 day')", today, today);
+  const createdToday = db.prepare('SELECT COUNT(*) AS n FROM orders' + createdTodayWhere.sql).get(...createdTodayWhere.params).n;
 
+  // Entregadas hoy (por fecha del evento de entrega).
+  const deliveredClauses = ["e.event_type = 'status'", "e.to_status = 'Entregado'",
+    'e.created_at >= ?', "e.created_at < date(?, '+1 day')"];
+  const deliveredParams = [today, today];
+  if (filters.technician) { deliveredClauses.push('e.assigned_technician = ?'); deliveredParams.push(filters.technician); }
+  if (filters.deviceType) { deliveredClauses.push('o.device_type = ?'); deliveredParams.push(filters.deviceType); }
+  if (filters.status) { deliveredClauses.push('o.status = ?'); deliveredParams.push(filters.status); }
+  if (filters.problem) { deliveredClauses.push('EXISTS (SELECT 1 FROM json_each(o.problems) WHERE value = ?)'); deliveredParams.push(filters.problem); }
+  const deliveredToday = db.prepare(`SELECT COUNT(*) AS n FROM order_events e JOIN orders o ON o.id = e.order_id
+    WHERE ${deliveredClauses.join(' AND ')}`).get(...deliveredParams).n;
+
+  // Gráficas del período: los conteos los hace SQLite (GROUP BY) en vez de
+  // traer cada orden a memoria. Los empates se ordenan por primera aparición,
+  // igual que antes.
   const byCreated = new Map();
-  for (const order of rangeOrders) {
-    const bucket = dateBucket(order.created_at, interval);
+  for (const row of db.prepare(`SELECT substr(orders.created_at, 1, 10) AS day, COUNT(*) AS n
+      FROM orders${rangeWhere.sql} GROUP BY day`).all(...rangeWhere.params)) {
+    const bucket = dateBucket(row.day, interval);
     if (bucket) {
       const found = byCreated.get(bucket.key) || bucket;
-      found.value++;
+      found.value += row.n;
       byCreated.set(bucket.key, found);
     }
   }
-  const completedQuery = db.prepare(`
-    SELECT e.*, o.created_at AS order_created_at, o.device_type, o.problems
-    FROM order_events e JOIN orders o ON o.id = e.order_id
-    WHERE e.event_type = 'status' AND e.to_status = 'Entregado'
-      AND (? = '' OR date(e.created_at) >= date(?))
-      AND (? = '' OR date(e.created_at) <= date(?))
-      AND (? = '' OR o.device_type = ?)
-  `);
-  const completed = completedQuery.all(filters.from, filters.from, filters.to, filters.to,
-    filters.deviceType, filters.deviceType).filter(e => {
-      if (filters.status && filters.status !== 'Entregado') return false;
-      if (filters.technician && e.assigned_technician !== filters.technician) return false;
-      if (filters.problem && !JSON.parse(e.problems || '[]').includes(filters.problem)) return false;
-      return true;
-    });
+  const statusCounts = new Map(db.prepare(`SELECT orders.status AS label, COUNT(*) AS n
+      FROM orders${rangeWhere.sql} GROUP BY orders.status`).all(...rangeWhere.params).map(r => [r.label, r.n]));
+  const sortedCounts = rows => rows.filter(r => r.label).map(r => ({ label: r.label, value: r.value }))
+    .sort((x, y) => y.value - x.value);
+  const devices = sortedCounts(db.prepare(`SELECT orders.device_type AS label, COUNT(*) AS value, MIN(orders.id) AS first
+      FROM orders${rangeWhere.sql} GROUP BY orders.device_type ORDER BY first`).all(...rangeWhere.params));
+  const issues = sortedCounts(db.prepare(`SELECT p.value AS label, COUNT(*) AS value, MIN(orders.id * 1000 + p.key) AS first
+      FROM orders JOIN json_each(orders.problems) p${rangeWhere.sql} GROUP BY p.value ORDER BY first`)
+    .all(...rangeWhere.params)).slice(0, 10);
+
+  // Entregas del período (para tiempos de reparación). Los filtros se aplican
+  // en SQL y solo se traen las 3 columnas que se usan.
+  let completed = [];
+  if (!filters.status || filters.status === 'Entregado') {
+    const clauses = ["e.event_type = 'status'", "e.to_status = 'Entregado'"];
+    const params = [];
+    if (filters.from) { clauses.push('e.created_at >= ?'); params.push(filters.from); }
+    if (filters.to) { clauses.push("e.created_at < date(?, '+1 day')"); params.push(filters.to); }
+    if (filters.deviceType) { clauses.push('o.device_type = ?'); params.push(filters.deviceType); }
+    if (filters.technician) { clauses.push('e.assigned_technician = ?'); params.push(filters.technician); }
+    if (filters.problem) { clauses.push('EXISTS (SELECT 1 FROM json_each(o.problems) WHERE value = ?)'); params.push(filters.problem); }
+    completed = db.prepare(`SELECT e.assigned_technician, e.created_at, o.created_at AS order_created_at
+      FROM order_events e JOIN orders o ON o.id = e.order_id WHERE ${clauses.join(' AND ')}`).all(...params);
+  }
   const turnaround = completed.map(e => ({
     technician: e.assigned_technician,
     hours: Math.max(0, (dateMs(e.created_at) - dateMs(e.order_created_at)) / 3600000),
@@ -717,15 +796,7 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
     return sorted.length % 2 ? sorted[(sorted.length - 1) / 2] :
       (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
   };
-  const countBy = (rows, valueOf) => {
-    const counts = new Map();
-    for (const row of rows) {
-      const label = valueOf(row);
-      if (label) counts.set(label, (counts.get(label) || 0) + 1);
-    }
-    return [...counts].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
-  };
-  const statuses = STATUSES.map(label => ({ label, value: rangeOrders.filter(o => o.status === label).length }));
+  const statuses = STATUSES.map(label => ({ label, value: statusCounts.get(label) || 0 }));
   const technicians = TECHNICIANS.map(label => ({
     label, value: openOrders.filter(o => o.assigned_technician === label).length,
     completed: completed.filter(e => e.assigned_technician === label).length,
@@ -751,9 +822,9 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
   res.json({
     generatedAt: new Date().toISOString(), interval, filters,
     summary: {
-      createdToday: categoryOrders.filter(o => o.created_at.slice(0, 10) === today).length,
+      createdToday,
       open: openOrders.length,
-      inRepair: categoryOrders.filter(o => o.status === 'En reparación').length,
+      inRepair: openOrders.filter(o => o.status === 'En reparación').length,
       ready: readyOrders.length,
       deliveredToday,
       aging: openOrders.filter(o => ageDays(o) >= 3).length,
@@ -763,8 +834,8 @@ app.get('/api/dashboard', staffRateLimit, requireAuth, (req, res) => {
     created: [...byCreated.values()].sort((a, b) => a.key.localeCompare(b.key)),
     statuses,
     technicians,
-    devices: countBy(rangeOrders, o => o.device_type),
-    issues: countBy(rangeOrders.flatMap(o => JSON.parse(o.problems || '[]')), p => p).slice(0, 10),
+    devices,
+    issues,
     aging,
     pickupWaiting,
     turnaround: { medianHours: median(turnaround.map(t => t.hours)), completedCount: turnaround.length, byTechnician: turnaroundByTechnician },

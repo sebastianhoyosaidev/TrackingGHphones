@@ -287,7 +287,12 @@ document.getElementById('btn-new-order').addEventListener('click', () => {
 
 // ---------- Orders list ----------
 let currentStatusFilter = '';
-document.getElementById('orders-search').addEventListener('input', loadOrders);
+// Espera 300 ms después de la última tecla antes de buscar (no una petición por letra).
+let ordersSearchTimer = null;
+document.getElementById('orders-search').addEventListener('input', () => {
+  clearTimeout(ordersSearchTimer);
+  ordersSearchTimer = setTimeout(loadOrders, 300);
+});
 for (const id of ['orders-from', 'orders-to', 'orders-technician', 'orders-device', 'orders-problem']) {
   document.getElementById(id).addEventListener('change', loadOrders);
 }
@@ -314,6 +319,7 @@ document.querySelectorAll('#status-filter .chip').forEach(b => {
 const ORDERS_PAGE_SIZE = 50;
 let ordersNextCursor = null;
 let ordersRequestId = 0;
+let ordersAbort = null;
 
 async function loadOrders(append) {
   // Los listeners pasan un Event; solo `true` significa "Cargar más".
@@ -333,6 +339,11 @@ async function loadOrders(append) {
     .forEach(key => { if (list.dataset[key]) q.set(key, list.dataset[key]); });
   q.set('limit', String(ORDERS_PAGE_SIZE));
   if (append && ordersNextCursor) q.set('cursor', String(ordersNextCursor));
+  if (!append) clearTimeout(ordersSearchTimer);
+  // Cancela la petición anterior que siga en camino (búsqueda vieja).
+  if (ordersAbort) ordersAbort.abort();
+  ordersAbort = new AbortController();
+  const signal = ordersAbort.signal;
   const requestId = ++ordersRequestId;
   if (append) {
     moreBtn.disabled = true;
@@ -343,7 +354,7 @@ async function loadOrders(append) {
     list.innerHTML = '<p class="empty">Cargando órdenes…</p>';
   }
   try {
-    const response = await api('/api/orders?' + q);
+    const response = await api('/api/orders?' + q, { signal });
     if (!response.ok) throw new Error('No se pudieron cargar las órdenes.');
     const data = await response.json();
     if (requestId !== ordersRequestId) return; // llegó una búsqueda más nueva
@@ -398,8 +409,10 @@ async function loadOrders(append) {
     if (append) alert('No se pudieron cargar más órdenes. Revisa la conexión.');
     else list.innerHTML = '<p class="empty">No se pudo cargar. Revisa la conexión.</p>';
   } finally {
-    moreBtn.disabled = false;
-    moreBtn.textContent = 'Cargar más';
+    if (requestId === ordersRequestId) {
+      moreBtn.disabled = false;
+      moreBtn.textContent = 'Cargar más';
+    }
   }
 }
 document.getElementById('orders-load-more').addEventListener('click', () => loadOrders(true));
@@ -742,34 +755,29 @@ function openOrdersFromChart(params) {
 }
 
 document.getElementById('dashboard-export').addEventListener('click', async () => {
+  // El servidor arma el CSV por partes y el navegador lo guarda directo a
+  // disco: no se carga todo el reporte en memoria.
   const button = document.getElementById('dashboard-export');
   const original = button.textContent;
   button.disabled = true;
   button.textContent = 'Preparando…';
   try {
+    const me = await api('/api/me');
+    if (!me.ok) throw new Error('Tu sesión expiró. Vuelve a iniciar sesión.');
     const query = dashboardQuery();
-    const response = await api('/api/orders?' + query);
-    if (!response.ok) throw new Error('No se pudo generar el reporte.');
-    const orders = await response.json();
-    const columns = [
-      ['Ticket', 'ticket'], ['Cliente', 'customer_name'], ['Teléfono', 'phone'], ['Equipo', 'device_type'],
-      ['Modelo', 'model'], ['Problemas', o => o.problems.join('; ')], ['Estado', 'status'],
-      ['Técnico asignado', 'assigned_technician'], ['Recibió', 'received_by'], ['Fecha de ingreso', 'created_at'],
-      ['Fecha prometida', 'promised_at'], ['Último cambio de estado', 'status_changed_at']
-    ];
-    const csvCell = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    const csv = '\uFEFF' + [columns.map(([label]) => csvCell(label)).join(','), ...orders.map(order =>
-      columns.map(([, key]) => csvCell(typeof key === 'function' ? key(order) : order[key])).join(','))].join('\r\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    query.delete('interval');
     const link = document.createElement('a');
-    link.href = url;
+    link.href = '/api/orders/export.csv?' + query;
     link.download = `reporte-ordenes-${localDateInput(new Date())}.csv`;
+    document.body.appendChild(link);
     link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    link.remove();
   } catch (error) {
     alert(error.message || 'No se pudo generar el reporte.');
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    setTimeout(() => {
+      button.disabled = false;
+      button.textContent = original;
+    }, 1500);
   }
 });

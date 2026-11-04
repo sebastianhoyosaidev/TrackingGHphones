@@ -12,6 +12,24 @@ la app de verdad corre en el servidor (Oracle Cloud).
 - La pestaña Órdenes carga 50 a la vez y muestra el botón "Cargar más".
 - Las respuestas viejas de la búsqueda se descartan si ya llegó una más nueva.
 
+**Rendimiento (probado con 20.000 órdenes y 78.000 eventos)**
+- Panel: los conteos y gráficas los calcula la base de datos (GROUP BY) y solo
+  se cargan las órdenes abiertas, no todo el historial. De ~1,7 s a ~0,16 s
+  por carga, con exactamente los mismos números.
+- Filtros por fecha comparan `created_at` directo (sin `date()`), así usan
+  el índice. Mismo resultado.
+- Índices nuevos: `orders(created_at)`, `orders(status)`,
+  `order_events(order_id, event_type, to_status, created_at)` y
+  `order_events(event_type, to_status, created_at)`. Se crean solos al
+  arrancar; no cambian datos.
+- Login y cambio de contraseña usan scrypt asíncrono: verificar una clave ya
+  no congela las demás peticiones.
+- Exportación CSV: nueva ruta `GET /api/orders/export.csv`, que envía el
+  archivo por partes de 500 y el navegador lo guarda directo. Mismo contenido
+  que antes, sin cargar todo en memoria.
+- Búsqueda de órdenes: espera 300 ms tras la última tecla y cancela la
+  petición anterior (antes, una petición por letra).
+
 **Limpieza**
 - Se quitaron los espacios reservados para la mascota Blu (encabezado y
   formulario de ingreso).
