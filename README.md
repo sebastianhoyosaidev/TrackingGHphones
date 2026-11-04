@@ -28,7 +28,7 @@ Built for **Geeks Hollywood** (4514 Hollywood Blvd, Hollywood, FL · (754) 888-9
 - **Delete test orders** — orders still in `Recibido` can be deleted (API + "Eliminar" button on the card); later statuses are protected
 - **Backups** — `npm run backup` snapshots the database to timestamped files in `backend/backups/` (see Backups section)
 - **Security headers** on every response (`nosniff`, `DENY` framing, `no-referrer`, basic CSP) and no `X-Powered-By` fingerprint
-- **Geeks Hollywood branding** — official logo, brand orange `#F05228`, blue `#2B5FA6`, red accent `#ef3f56`, dark navy header. Two clearly-marked placeholder slots are reserved for **Blu**, the shop mascot (header + above the intake form) — waiting on the real mascot image.
+- **Geeks Hollywood branding** — official logo, brand orange `#F05228`, blue `#2B5FA6`, red accent `#ef3f56`, dark navy header.
 
 ## Tech
 
@@ -176,5 +176,4 @@ WAL sidecar files (`repairshop.db-wal`, `repairshop.db-shm`) are recreated autom
 ## Notes
 
 - All UI text is in Spanish, matching the shop's counter workflow.
-- Blu mascot slots are intentional placeholders (`blu-slot-header`, `blu-slot-intake` in the HTML/CSS) — replace with the real mascot image when available.
 - `npm audit` is blocked by the sandbox network proxy (403 `policy_denied` on the npm security endpoint, verified 2026-10-16). Run it from an unrestricted network before any production deploy, and deploy with `npm ci`. Manual review 2026-10-16: `express 4.22.3` and `qs 6.16.0` are current; no applicable CVEs found by hand.

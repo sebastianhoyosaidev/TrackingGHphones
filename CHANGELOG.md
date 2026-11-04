@@ -3,6 +3,30 @@
 Notas de cada versión publicada. El código vive en este repo privado;
 la app de verdad corre en el servidor (Oracle Cloud).
 
+## Sin publicar — rendimiento sobre v1.4.0
+
+Probado con `demo.db` de 2 años (5.794 órdenes, `seed-demo.js --days 730`).
+`repairshop.db` no se tocó. Todas las respuestas son idénticas a v1.4.0
+(22 consultas comparadas: panel, insights, lista, filtros y exportación).
+
+- **Arranque**: la limpieza de duplicados del historial (v1.4.0) tardaba
+  ~35 s en arrancar con 5.800 órdenes porque SQLite usaba el índice
+  equivocado. Con un `+` en la consulta baja a ~0,3 s. Borra exactamente lo
+  mismo (verificado con huella del resultado).
+- **Índices** nuevos: por fecha (con las columnas del panel), estado, técnico,
+  equipo y eventos por orden/estado. Se crean solos al arrancar.
+- **Filtros de fecha** sin `date()`: mismo resultado, usan índice.
+- **Panel**: conteos y gráficas en SQL; solo se cargan las órdenes abiertas;
+  un recorrido para técnicos, antigüedad y recogida. Mes: ~90 → ~12 ms.
+  Año: ~450 → ~30 ms.
+- **Filtro "entregadas por técnico/fecha"** (clics del panel): se arma una
+  sola vez la lista de entregas que cumplen. ~30 → ~20 ms.
+- **Login y cambio de contraseña**: scrypt asíncrono; ya no congelan las
+  demás peticiones mientras se verifica una clave.
+- **Panel en el navegador**: cancela la petición anterior (panel e insights)
+  si se vuelve a pedir.
+- Se quitan los espacios reservados de la mascota Blu.
+
 ## v1.4.0 — 2026-10-22 — Garantías, dinero por entrar y panel de clientes, marketing y repuestos
 
 **Garantía / devolución (60 días)**
