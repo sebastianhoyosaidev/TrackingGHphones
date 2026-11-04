@@ -12,6 +12,19 @@ la app de verdad corre en el servidor (Oracle Cloud).
 - La pestaña Órdenes carga 50 a la vez y muestra el botón "Cargar más".
 - Las respuestas viejas de la búsqueda se descartan si ya llegó una más nueva.
 
+**Rendimiento, segunda ronda (probado con 100.000 órdenes)**
+- Índices "de cobertura": `orders(created_at, status, device_type,
+  assigned_technician)` y `order_events(event_type, to_status, created_at,
+  order_id, assigned_technician)` reemplazan a los anteriores de fecha. Nuevos
+  `orders(assigned_technician, device_type)` y `orders(device_type)`.
+  `PRAGMA optimize` al arrancar.
+- Panel: técnicos, antigüedad y espera de recogida se cuentan en un solo
+  recorrido; las etiquetas de fecha reutilizan el formateador. Panel filtrado
+  por técnico/equipo de ~480 ms a ~45 ms; panel de un año de ~0,8 s a ~0,45 s.
+  Mismos números.
+- El panel cancela la petición anterior si se vuelve a pedir (clics
+  seguidos en la pestaña o en filtros).
+
 **Rendimiento (probado con 20.000 órdenes y 78.000 eventos)**
 - Panel: los conteos y gráficas los calcula la base de datos (GROUP BY) y solo
   se cargan las órdenes abiertas, no todo el historial. De ~1,7 s a ~0,16 s
